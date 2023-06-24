@@ -1,6 +1,6 @@
 {
     "app_name": "Matcha",
-    "description": "Redis-based matchmaking for 1v1 games using RedisJSON",
+    "description": "Redis-based matchmaking for 1v1 games using Redis JSON",
     "rank": 360,
     "type": "Full App",
     "contributed_by": "Community",
@@ -22,9 +22,9 @@
         "Python"
     ],
     "redis_commands": ["JSON.SET", "JSON.NUMINCRBY", "JSON.GET", "ZADD", "SUBSCRIBE", "UNSUBSCRIBE", "ZSCAN", "ZSCORE", "ZRANGEBYSCORE", "ZREM", "PUBLISH"],
-    "redis_features": [],
-    "redis_modules": [
-        "RedisJSON"
+    "redis_use_cases": [],
+    "redis_features": [
+        "JSON"
     ],
     "app_image_urls": [
         "https://raw.githubusercontent.com/redis-developer/matcha/main/diagram.png"
