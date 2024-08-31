@@ -15,7 +15,7 @@ def calculate_new_rating(
     player_b_wins = calculate_probability(rating_player_a, rating_player_b)
 
     # Case -1 When Player A wins
-    # Updating the Elo Ratings
+    # Updating the ordinal
     # Player A won
     if winner == 0:
         new_rating_a = rating_player_a + K * (1 - player_a_wins)

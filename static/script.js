@@ -4,7 +4,14 @@ var player = "test_user_" + Math.floor(Math.random() * 1000000);
 function connect(event) {
     var timer = startTimer()
 
-    ws = new WebSocket("ws://0.0.0.0:8000/queue?user=" + player);
+    var baseUrl = window.location.host
+    var webSocketProtocol = window.location.protocol.includes('https') ? `wss` : `ws`
+    var extraQueries = ''
+    var ratingEl = document.getElementById('rating')
+    if (ratingEl) {
+        extraQueries += `&rating=${rating.value}`
+    }
+    ws = new WebSocket(`${webSocketProtocol}://${baseUrl}/queue?user=${player}${extraQueries}`);
     addMessageToMessages(player + " has entered the queue.")
 
     ws.onmessage = function (event) {
@@ -12,8 +19,6 @@ function connect(event) {
         addMessageToMessages("Found a game after " + seconds + " seconds.")
         var jsonObject = JSON.parse(event.data)
         addMessageToMessages(jsonObject.player_1 + " will be facing " + jsonObject.player_2 + " in room " + jsonObject.room_id + ".")
-
-
         setTimeout(simulateMatch, 2500, jsonObject.player_1, jsonObject.player_2)
     };
     event.preventDefault()
@@ -56,7 +61,7 @@ function simulateMatch(player_1, player_2) {
         var json = JSON.stringify(data);
 
         var xhr = new XMLHttpRequest();
-        xhr.open("POST", "http://0.0.0.0:8000/game");
+        xhr.open("POST", `${window.location.protocol}://${baseUrl}/game`);
         xhr.setRequestHeader("Content-Type", "application/json");
         xhr.send(json);
     }
