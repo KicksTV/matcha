@@ -5,7 +5,6 @@ import time
 
 from redis import asyncio as aioredis, Redis
 
-from app.helpers.db import add_match
 from app.helpers.config import config
 
 logger = logging.getLogger("matcha")
@@ -17,7 +16,7 @@ r = Redis(host='redis', port=6379)
 
 async def _put_user_queue(user_id: str, user_ordinal: float):
     redis = await aioredis.from_url("redis://redis:6379/1")
-
+    logger.debug(f"adding rank to queue: {user_ordinal}")
     await redis.zadd("matchmaking_pool", {user_id: user_ordinal})
     await redis.zadd("matchmaking_time", {user_id: time.time()})
 
@@ -59,6 +58,17 @@ async def _get_match_proceeding(channel: aioredis.client.PubSub, user_id: str):
                 break
     return match
 
+async def _listen_match_channel(channel: aioredis.client.PubSub):
+    while True:
+        msg = await channel.get_message(ignore_subscribe_messages=True)
+        if msg is not None:
+            logger.debug(f"(Reader) Message Received: {msg}")
+            data = json.loads(msg["data"].decode())
+            match = data
+            break
+    return match
+
+
 async def search_match(user: dict) -> dict:
     # Add user to the queue
     await _put_user_queue(user["id"], user["ordinal"])
@@ -83,4 +93,22 @@ async def match_responses(match: dict, user_id: str):
 async def start_match(match: dict):
     r = aioredis.from_url("redis://redis/2")
     await r.publish("match_responses", json.dumps(match))
+    return match
+
+async def match_result(match: dict):
+    r = aioredis.from_url("redis://redis/2")
+    async with r.pubsub() as pubsub:
+        await pubsub.subscribe(f"match_result:{match['id']}")
+        match_task = asyncio.create_task(_listen_match_channel(pubsub))
+        await match_task
+        match = match_task.result()
+    return match
+
+async def match_finished(match: dict):
+    r = aioredis.from_url("redis://redis/2")
+    async with r.pubsub() as pubsub:
+        await pubsub.subscribe(f"match_finished:{match['id']}")
+        match_task = asyncio.create_task(_listen_match_channel(pubsub))
+        await match_task
+        match = match_task.result()
     return match

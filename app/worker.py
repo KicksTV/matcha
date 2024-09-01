@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import requests
 import time
 import signal
 import secrets
@@ -24,23 +25,33 @@ logger.addHandler(ch)
 matchmaking_pool = redis.Redis(host="redis", port=6379, db=1)
 pub = redis.Redis(host="redis", port=6379, db=2)
 
+baseUrl = 'http://192.168.0.38:8000' if config.environment == 'debug' else 'https://running-app-efd09e797a8a.herokuapp.com'
 
-def publish_match(player_ids, match_id):
+
+def publish_match(player_ids):
     logger.debug("Publishing match...")
-    match_data = {
-        'players': [],
-        "match_id": match_id,
-    }
-    for pid in player_ids:
-        match_data['players'].append(pid.decode('utf-8'))
-    match = asyncio.run(add_match(match_data))
-    logger.debug(f"Created match: {match}")
-    pub.publish("matches", json.dumps(match_data))
 
-    logger.debug(f"Starting queue pop timer")
-    # setup a timer for 15 seconds
-    timer = Timer(17.0, queue_time_out, args=(match,))
-    timer.start()
+    # create match sql record
+    match_data = {
+        'players': [pid.decode('utf-8') for pid in player_ids],
+        'status': 'STARTING',
+        'createdOn': time.time()
+    }
+    resp = requests.post(f'{baseUrl}/api/matches/init-match/', data=json.dumps(match_data), headers={'Content-Type': 'application/json'})
+    if resp.ok:
+        match_data = resp.json()
+        match = asyncio.run(add_match(match_data))
+        logger.debug(f"Created match: {match}")
+        pub.publish("queue", json.dumps(match_data))
+
+        logger.debug(f"Starting queue pop timer")
+        # setup a timer for 15 seconds
+        timer = Timer(17.0, queue_time_out, args=(match,))
+        timer.start()
+    else:
+        logger.debug('FAILED TO CREATE SQL MATCH')
+        logger.debug(resp.reason)
+        logger.debug(resp.content)
 
 def queue_time_out(match):
     logger.debug(f"Queue timed out. Match will now be cancelled!")
@@ -150,7 +161,7 @@ def find_matches():
                 player_ids.append(possible_opponents[i]["id"])
 
             # Return the opponent that has been queueing the longest
-            publish_match(player_ids, secrets.token_hex(6))
+            publish_match(player_ids)
 
 
 def terminate(signal, frame):

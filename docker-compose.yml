@@ -7,17 +7,19 @@ services:
     # command: redis-cli -h 0.0.0.0 -p 6379 flushall
   api:
     ports:
-      - '8002:8000'
+      - '8002:8002'
     build:
       context: .
       dockerfile: Dockerfile
-    command: uvicorn app.main:app --host 0.0.0.0
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8002
     environment:
       PYTHONPATH: .
       MATCHA_ENVIRONMENT: debug
     depends_on:
       - "redis"
   worker:
+    ports:
+    - '8003:8003'
     build:
       context: .
       dockerfile: Dockerfile

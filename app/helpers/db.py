@@ -63,12 +63,12 @@ async def add_match(match: dict):
     conn = await aioredis.from_url("redis://redis", encoding="utf-8")
     # set the time when queue popped
     match.update({
-        'time': time.time(),
+        'status': 'STARTING',
         'proceeding': False,
         'responses': [],
     })
     logger.debug(f"Adding match {match} to database.")
-    match_id = match["match_id"]
+    match_id = match["id"]
     await conn.json().set(f'match:{match_id}', "$", match)
     await conn.aclose()
     return match
