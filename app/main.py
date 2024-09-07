@@ -1,12 +1,18 @@
 import asyncio
+from asyncio import exceptions
 import json
 import logging
 import redis
+import traceback
 
 from asyncio.exceptions import CancelledError
+from asgiref.sync import sync_to_async
 from urllib.parse import unquote
 from redis import asyncio as aioredis
 from redis.exceptions import ResponseError
+from urllib.parse import unquote
+from threading import Event, Thread
+
 
 from starlette.applications import Starlette
 from starlette.responses import Response, JSONResponse
@@ -26,6 +32,7 @@ from app.helpers.db import (
     get_user,
     update_games_played,
     update_match_response,
+    insert_match_response,
     update_match_proceeding,
     get_match,
 )
@@ -41,19 +48,27 @@ ch.setLevel(logging.DEBUG)
 logger.addHandler(ch)
 
 
-class StarletteCustom(Starlette):
-    sessions = {"match-making": []}
 
-HEART_BEAT_INTERVAL = 5
+def call_repeatedly(interval, func, *args):
+    stopped = Event()
+    def loop():
+        while not stopped.wait(interval): # the first call is in `interval` secs
+            asyncio.run(func(*args))
+    Thread(target=loop).start()    
+    return stopped.set
+
+
+HEART_BEAT_INTERVAL = 3.0
 async def is_websocket_active(ws: WebSocket) -> bool:
     if not (ws.application_state == WebSocketState.CONNECTED and ws.client_state == WebSocketState.CONNECTED):
         return False
     try:
         await asyncio.wait_for(ws.send_json({'type': 'ping'}), HEART_BEAT_INTERVAL)
-        message = await asyncio.wait_for(ws.receive_json(), HEART_BEAT_INTERVAL)
+        message = await asyncio.wait_for(ws.receive(), HEART_BEAT_INTERVAL)
         assert message['type'] == 'pong'
-    except BaseException:  # asyncio.TimeoutError and ws.close()
-        return False
+    except Exception as e:  # asyncio.TimeoutError and ws.close()
+        logger.error(e)
+        await ws.close()
     return True
 
 def queue_data(request):
@@ -71,7 +86,7 @@ def queue_data(request):
         users.append(json.loads(r['json']))
     return JSONResponse(users)
 
-pub = redis.Redis(host="redis", port=6379, db=2)
+pub = redis.Redis(host="172.23.109.48", port=6379, db=2)
 
 class QueuePubSubListener(object):
     def __init__(self):
@@ -106,7 +121,7 @@ class QueuePubSubListener(object):
             for pid in match["players"]:
                 if pid in self.clients:
                     ws = self.clients[pid]
-                    ws.handle_match_found(ws, match)
+                    MatchMaking.handle_match_found(pid, ws, match)
                 else:
                     missing_players.append(pid)
 
@@ -128,7 +143,11 @@ class QueuePubSubListener(object):
         self.users[user['id']] = user
     
     def remove_user(self, user_id: str):
-        del self.users[user_id]
+        try:
+            del self.users[user_id]
+        except Exception as e:
+            logger.error(e)
+            logger.debug(f'Failed to delete user from queue: {self.users}')
 
 class MatchPubSubListener(object):
     def __init__(self):
@@ -143,38 +162,39 @@ class MatchPubSubListener(object):
         if user_id not in self.clients:
             self.clients[user_id] = client
         else:
-            logger.error(f'{user_id} already exists in QueuePubSubListener clients list. They should not be allowed to join queue if already searching!!!')
+            logger.error(f'{user_id} already exists in MatchPubSubListener clients list. They should not be allowed to join queue if already searching!!!')
 
     def unregister(self, user_id: str):
         if user_id in self.clients:
             del self.clients[user_id]
         else:
-            logger.error(f'{user_id} never existed in QueuePubSubListener clients list!!!!')
+            logger.error(f'{user_id} never existed in MatchPubSubListener clients list!!!!')
 
     def handler_match_response(self, message):
         msg = message['data']
         if msg is not None:
             logger.debug(f"(Reader) Match Response Message Received: {msg}")
             match = json.loads(msg.decode())
-
-            match_id = match['match']
-            user_id = match['user']
-            response = match['response']
-
-            asyncio.run(update_match_response(match_id, user_id, response))
-
-            match = asyncio.run(get_match(match_id))
-
-
-            all_players_responded = False
+            match_id = match['id']
 
             if 'timedout' in match and match['timedout']:
+                if len(match['players']) == len(match['responses']):
+                    # already handled match
+                    return
                 logger.debug(f"Not all players responded in time. Match cancelled!")
                 match['proceeding'] = False
                 all_players_responded = True
-                asyncio.run(update_match_proceeding(match_id, proceeding=True))
+                asyncio.run(update_match_proceeding(match_id, proceeding=False))
 
-            elif len(list(filter(lambda r: r == "ACCEPTED", match["responses"]))) >= config.players_per_match:
+                for pid in match['players']:
+                    if pid in self.clients:
+                        ws = self.clients[pid]
+                        MatchMaking.handle_match_status(pid, ws, match)
+                return
+
+            all_players_responded = False
+
+            if len(list(filter(lambda r: r == "ACCEPTED", match["responses"]))) >= config.players_per_match:
                 logger.debug(f"All players have ACCEPTED the queue pop.")
                 match['proceeding'] = True
                 all_players_responded = True
@@ -189,7 +209,7 @@ class MatchPubSubListener(object):
                 for pid in match['players']:
                     if pid in self.clients:
                         ws = self.clients[pid]
-                        ws.handle_match_status(ws, match)
+                        MatchMaking.handle_match_status(pid, ws, match)
                     else:
                         missing_players.append(pid)
 
@@ -216,10 +236,13 @@ class MatchPubSubListener(object):
 
 queue_listener = QueuePubSubListener()
 match_listener = MatchPubSubListener()
-from urllib.parse import unquote
+
+match_making_sessions = {'match-making': []}
+
 class MatchMaking(WebSocketEndpoint):
 
-    match_groups = {}
+    is_alive = True
+    received_pong = False
 
     def get_params(self, websocket: WebSocket) -> dict:
         params_raw = websocket.get("query_string", b"").decode("utf-8")
@@ -233,149 +256,230 @@ class MatchMaking(WebSocketEndpoint):
         params = self.get_params(websocket)
         app = self.scope.get("app", None)
         self.channel_name = "match-making" # self.get_params(websocket).get('username', 'default_name')
-        self.sessions = app.sessions
-
-        user = unquote(params["user"])
-        logger.debug(user)
-        userDict = json.loads(user)
-        self.userDict = userDict
-        logger.debug(userDict)
-        user_id = str(userDict["id"])
-        player = userDict["player"]
-        ordinal = player["ordinal"]
-        ordinal = float(ordinal)
-        logger.debug(f"Rating for {user_id} is {ordinal}.")
-        if not user_id:
-            await websocket.close(code=1008)
-
-        user = await get_user(user_id)
-
-        # Add user to databaase as guest if not yet registered
-        if not user:
-            user = await add_user(userDict)
-        else:
-            logger.debug(f"Updating ordinal {ordinal} for {user_id}.")
-            await update_ordinal(user_id, ordinal)
-
-        
-        await _put_user_queue(user_id, ordinal)
-
-        # register to queue listener
-        queue_listener.register(websocket, user_id)
-
-        logger.debug(f"Registered user into queue: {user}")
 
         await websocket.accept()
 
-        if self.channel_name in self.sessions:
-            self.sessions[self.channel_name].append(websocket)
+        # check to make sure connection is alive
+        self.ticker_task = asyncio.create_task(self.tick(websocket))
+
+        if self.channel_name in match_making_sessions:
+            match_making_sessions[self.channel_name].append(websocket)
         else:
-            self.sessions[self.channel_name] = [websocket]
+            match_making_sessions[self.channel_name] = [websocket]
 
     async def on_disconnect(self, websocket: WebSocket, close_code: int):
-        user_id = self.userDict['id']
-        logger.debug(
-            f"Removing session {self.userDict['player']['fullName']} from queue."
-        )
-        try:
-            queue_listener.unregister(user_id)
-            queue_listener.remove_user(user_id)
-        except Exception as e:
-            print(e)
 
-        try:
-            match_listener.unregister(user_id)
-            match_listener.remove_user(user_id)
-        except Exception as e:
-            print(e)
+        if self.userDict:
+            try:
+                user_id = self.userDict['id']
+                logger.debug(
+                    f"Removing session {self.userDict['player']['fullName']} from queue."
+                )
+            except:
+                pass
 
-        # self.sessions.pop(self.channel_name, None)
-        await self.broadcast_json(
-            self.channel_name,
-            json.dumps(
+        self.is_alive = False
+        self.ticker_task.cancel()
+
+        if user_id:
+            try:
+                await del_user(user_id)
+            except Exception as e:
+                logger.debug(e)
+
+            try:
+                queue_listener.unregister(user_id)
+                queue_listener.remove_user(user_id)
+            except Exception as e:
+                pass
+
+            try:
+                match_listener.unregister(user_id)
+                match_listener.remove_user(user_id)
+            except Exception as e:
+                pass
+
+            await sync_to_async(self.broadcast_json)(
+                self.channel_name,
                 {"type": "updateQueue", "action": "REMOVE", "user": self.userDict}
             )
-        )
-        await websocket.close(code=1008)
-
-    async def broadcast_json(self, channel: str,  json: str):
-        if channel in self.sessions:
-            for ws in list(self.sessions[channel]):
-                try:
-                    await ws.send_json(json)
-                except Exception as e:
-                    logger.debug(e)
-                    index = self.sessions[channel].index(ws)
-                    self.sessions[channel].pop(index)
+        # await websocket.close(code=1008)
 
     async def on_receive(self, ws, data):
         logger.debug(f"Received ws msg with data {data}.")
         data = json.loads(data)
 
-        user = await get_user(data['user']['id'])
+        if data['type'] == 'pong':
+            logger.debug('Received PONG')
+            self.received_pong = True
+            return
+        
+        if data['type'] == 'joinQueue':
+            await self.handle_join_queue(ws, data)
+            return
 
-        if data['type'] == 'MatchResponse':
+        user = await get_user(str(data['userId']))
+        logger.debug(f"Fetched user: {user}")
+
+        if data['type'] == 'matchResponse':
             await self.handle_match_response(ws, data)
-        elif data['type'] == 'MatchResult':
+        elif data['type'] == 'matchResult':
             await self.handle_match_result(ws, data)
         elif data['type'] == 'updateQueue':
             if data['action'] == 'ADD':
                 # notify about a new person joining queue
-                await self.broadcast_json(
+                await sync_to_async(self.broadcast_json)(
                     self.channel_name,
                     {"type": "updateQueue", "action": "ADD", "user": user}
                 )
             elif data['action'] == 'REMOVE':
                  # notify about a new person joining queue
-                await self.broadcast_json(
+                await sync_to_async(self.broadcast_json)(
                     self.channel_name,
                     {"type": "updateQueue", "action": "REMOVE", "user": data['user']}
                 )
 
-    def add_session_to_match(self, ws: WebSocket, match_id: str):
-        if match_id in self.match_groups:
-            self.sessions[f'match:{match_id}'].append(ws)
-        else:
-            self.sessions[f'match:{match_id}'] = [ws]
+    async def tick(self, ws: WebSocket) -> None:
+        # counter = 0
+        while self.is_alive:
+            try:
+                logger.debug('Sending PING')
+                await asyncio.wait_for(ws.send_json({"type": 'ping'}), HEART_BEAT_INTERVAL)
+                # await asyncio.wait_for(self.received_pong(), HEART_BEAT_INTERVAL)
 
-    def handle_match_found(self, ws: WebSocket, match: dict):
-        user_id = self.userDict['id']
-        self.send({
-            'type': 'MatchFound',
-            'match': match
-        })
+                counter = 0
+                while not self.received_pong and counter < 5:
+                    counter += 1
+                    await asyncio.sleep(1)
+                if counter >= 5:
+                    logger.debug(f'WAITING FOR PONG TIMED OUT: {counter}')
+                    raise exceptions.TimeoutError()
+                # logger.debug(f'RECEIVED MSG: {msg}')
+            except Exception as e:
+                tracebac = traceback.print_tb()
+                self.is_alive = False
+                logger.debug(f'CLOSING WS, didn\'n receive pong: {e}: \n {tracebac}')
+                await ws.close()
+            await asyncio.sleep(3)
+
+    def add_session_to_match(self, ws: WebSocket, match_id: str):
+        if match_id in match_making_sessions:
+            match_making_sessions[f'match:{match_id}'].append(ws)
+        else:
+            match_making_sessions[f'match:{match_id}'] = [ws]
+
+    @staticmethod
+    def broadcast_json(channel: str,  json: dict):
+        if channel in match_making_sessions:
+            for ws in list(match_making_sessions[channel]):
+                try:
+                    asyncio.run(ws.send_json(json))
+                except Exception as e:
+                    logger.debug(e)
+                    index = match_making_sessions[channel].index(ws)
+                    match_making_sessions[channel].pop(index)
+
+
+    @staticmethod
+    def handle_match_found(user_id: str, ws: WebSocket, match: dict):
+        asyncio.run(ws.send_json({'type': 'matchFound', 'match': match}))
+
+        user_dict = asyncio.run(get_user(user_id))
 
         # subscribe to match listener
         match_listener.register(ws, user_id)
-        match_listener.add_user(user_id)
+        match_listener.add_user(user_dict)
 
-    async def handle_match_status(self, ws: WebSocket, match: dict):
-        user_id = self.userDict['id']
-        ws.send({
-            'type': 'MatchResponse',
-            'proceeding': match['proceeding'],
-            'match': match
-        })
+
+    @staticmethod
+    def handle_match_status(user_id: str, ws: WebSocket, match: dict):
+        asyncio.run(
+            ws.send_json({
+                'type': 'matchResponse',
+                'proceeding': match['proceeding'],
+                'match': match
+            })
+        )
+
+        user = asyncio.run(get_user(user_id))
 
         if match['proceeding']:
             # remove them from queue
             queue_listener.unregister(user_id)
             queue_listener.remove_user(user_id)
+            match_listener.unregister(user_id)
+            match_listener.remove_user(user_id)
 
-            self.add_session_to_match(ws, match['id'])
+            asyncio.run(
+                del_user(user_id))
+
+            MatchMaking.broadcast_json('match-making',
+                                    {"type": "updateQueue", "action": "REMOVE", "user": user})
+
+            # self.add_session_to_match(ws, match['id'])
         else:
-            # TODO: add them back into queue
-            pass
+            index = match['players'].index(user_id)
+            response = match['responses'][index]
+            if response == 'DECLINED':
+                queue_listener.unregister(user_id)
+                queue_listener.remove_user(user_id)
 
-    async def handle_match_response(self, ws: WebSocket, response: dict):
-        user_id = response['user']
-        match_id = response['match']
-        resp = response['response']
-        logger.debug(
-            f"handle_match_response, match: {match_id} user: {user_id} response: {resp}."
+            else:
+                # TODO: add them back into queue
+                asyncio.run(_put_user_queue(user_id, user['ordinal']))
+
+            match_listener.unregister(user_id)
+            match_listener.remove_user(user_id)
+
+    async def handle_join_queue(self, ws, data):
+        self.userDict = data['user']
+        logger.debug(self.userDict)
+        user_id = str(self.userDict["id"])
+        player = self.userDict["player"]
+        ordinal = float(player["ordinal"])
+        logger.debug(f"Rating for {user_id} is {ordinal}.")
+        if not user_id:
+            await ws.close(code=1008)
+        user = await get_user(user_id)
+        # Add user to databaase as guest if not yet registered
+        if not user:
+            user = await add_user(self.userDict)
+        else:
+            logger.debug(f"Updating ordinal {ordinal} for {user_id}.")
+            await update_ordinal(user_id, ordinal)
+        
+        await _put_user_queue(user_id, ordinal)
+        queue_listener.add_user(user)
+        # register to queue listener
+        queue_listener.register(ws, user_id)
+
+        logger.debug(f"Registered user into queue: {user}")
+
+        await sync_to_async(self.broadcast_json)('match-making', {
+                'type': 'updateQueue',
+                'action': 'ADD',
+                **self.userDict
+            }
         )
-        pub = aioredis.from_url("redis://localhost/2", decode_responses=True)
-        await pub.publish("match_responses", json.dumps(response))
+
+    async def handle_match_response(self, ws: WebSocket, data: dict):
+        user_id = data['userId']
+        match_id = data['matchId']
+        response = data['response']
+
+        match = await get_match(match_id)
+
+        index = match['players'].index(user_id)
+
+        await insert_match_response(match_id, user_id, response, index)
+
+        match['responses'].insert(3, response)
+
+        logger.debug(
+            f"handle_match_response, match: {match_id} user: {user_id} response: {response}."
+        )
+        pub = aioredis.from_url("redis://172.23.109.48/2", decode_responses=True)
+        await pub.publish("match_responses", json.dumps(match))
         await pub.close()
 
     async def handle_match_result(self, ws: WebSocket, result: dict):
@@ -393,14 +497,10 @@ class MatchMaking(WebSocketEndpoint):
         #     }
         # }
         match_id = result['match']
-        await self.broadcast_json(
+        await sync_to_async(self.broadcast_json)(
             f'match:{match_id}',
-            json.dumps(
-                {"type": "MatchResult", "result": result}
-            )
+            {"type": "MatchResult", "result": result}
         )
-
-
 
 
 
@@ -514,7 +614,7 @@ def startup():
 
 
 if config.environment == "debug":
-    allowed_hosts=['127.0.0.1:8002', 'localhost:8002', '192.168.0.38:8002']
+    allowed_hosts=['127.0.0.1:8002', '172.23.109.48:8002', '192.168.0.38:8002']
 else:
     allowed_hosts=['https://running-app-efd09e797a8a.herokuapp.com/']
 
@@ -534,4 +634,4 @@ routes = [
 if config.environment == "debug":
     routes.append(Mount("/", app=StaticFiles(directory="static"), name="static"))
 
-app = StarletteCustom(debug=True, routes=routes, on_startup=[startup])
+app = Starlette(debug=True, routes=routes, on_startup=[startup])

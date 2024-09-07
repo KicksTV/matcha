@@ -16,4 +16,5 @@ typing-extensions==3.7.4.3
 uvicorn==0.13.4
 websockets==8.1
 requests
+asgiref
 # pydantic==2.8.2

@@ -10,7 +10,7 @@ import redis
 
 from threading import Timer
 
-from app.helpers.db import add_match
+from app.helpers.db import add_match, get_match
 from app.helpers.config import config
 
 logger = logging.getLogger("matcha_worker")
@@ -22,10 +22,10 @@ logger.addHandler(ch)
 # Redis /1 is used for matchmaking pool
 # Redis /2 is used to put matches found
 
-matchmaking_pool = redis.Redis(host="redis", port=6379, db=1)
-pub = redis.Redis(host="redis", port=6379, db=2)
+matchmaking_pool = redis.Redis(host=config.redis_host, port=6379, db=1)
+pub = redis.Redis(host=config.redis_host, port=6379, db=2)
 
-baseUrl = 'http://192.168.0.38:8000' if config.environment == 'debug' else 'https://running-app-efd09e797a8a.herokuapp.com'
+baseUrl = 'http://172.23.109.48:8000' if config.environment == 'debug' else 'https://running-app-efd09e797a8a.herokuapp.com'
 
 
 def publish_match(player_ids):
@@ -37,23 +37,33 @@ def publish_match(player_ids):
         'status': 'STARTING',
         'createdOn': time.time()
     }
-    resp = requests.post(f'{baseUrl}/api/matches/init-match/', data=json.dumps(match_data), headers={'Content-Type': 'application/json'})
-    if resp.ok:
-        match_data = resp.json()
-        match = asyncio.run(add_match(match_data))
-        logger.debug(f"Created match: {match}")
-        pub.publish("queue", json.dumps(match_data))
+    try:
+        resp = requests.post(
+            f'{baseUrl}/api/matches/init-match/', data=json.dumps(match_data), headers={'Content-Type': 'application/json'}, timeout=5)
+        
+        if resp and resp.ok:
+            match_data = resp.json()
+            match = asyncio.run(add_match(match_data))
+            logger.debug(f"Created match: {match}")
+            pub.publish("queue", json.dumps(match_data))
 
-        logger.debug(f"Starting queue pop timer")
-        # setup a timer for 15 seconds
-        timer = Timer(17.0, queue_time_out, args=(match,))
-        timer.start()
-    else:
-        logger.debug('FAILED TO CREATE SQL MATCH')
-        logger.debug(resp.reason)
-        logger.debug(resp.content)
+            logger.debug(f"Starting queue pop timer")
+            # setup a timer for 15 seconds
+            timer = Timer(17.0, queue_time_out, args=(match,))
+            timer.start()
+        else:
+            logger.debug('FAILED TO CREATE SQL MATCH')
+            logger.debug(resp.reason)
+            logger.debug(resp.content)
+    except:
+        logger.error('Failed to save sql match')
+    
 
 def queue_time_out(match):
+    match = asyncio.run(get_match(match['id']))
+    if len(match['players']) == len(match['responses']):
+        # everyone responded, no need to continue
+        return
     logger.debug(f"Queue timed out. Match will now be cancelled!")
     match['timedout'] = True
     pub.publish("match_responses", json.dumps(match))
