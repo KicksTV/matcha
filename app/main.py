@@ -86,7 +86,7 @@ def queue_data(request):
         users.append(json.loads(r['json']))
     return JSONResponse(users)
 
-pub = redis.Redis(host="172.23.109.48", port=6379, db=2)
+pub = redis.Redis(**config.redis_options, db=2)
 
 class QueuePubSubListener(object):
     def __init__(self):
@@ -243,6 +243,8 @@ class MatchMaking(WebSocketEndpoint):
 
     is_alive = True
     received_pong = False
+    userDict = {}
+    ticker_task = None
 
     def get_params(self, websocket: WebSocket) -> dict:
         params_raw = websocket.get("query_string", b"").decode("utf-8")
@@ -258,9 +260,6 @@ class MatchMaking(WebSocketEndpoint):
         self.channel_name = "match-making" # self.get_params(websocket).get('username', 'default_name')
 
         await websocket.accept()
-
-        # check to make sure connection is alive
-        self.ticker_task = asyncio.create_task(self.tick(websocket))
 
         if self.channel_name in match_making_sessions:
             match_making_sessions[self.channel_name].append(websocket)
@@ -279,7 +278,8 @@ class MatchMaking(WebSocketEndpoint):
                 pass
 
         self.is_alive = False
-        self.ticker_task.cancel()
+        if self.ticker_task:
+            self.ticker_task.cancel()
 
         if user_id:
             try:
@@ -303,7 +303,7 @@ class MatchMaking(WebSocketEndpoint):
                 self.channel_name,
                 {"type": "updateQueue", "action": "REMOVE", "user": self.userDict}
             )
-        # await websocket.close(code=1008)
+        await websocket.close(code=1008)
 
     async def on_receive(self, ws, data):
         logger.debug(f"Received ws msg with data {data}.")
@@ -356,10 +356,10 @@ class MatchMaking(WebSocketEndpoint):
                     raise exceptions.TimeoutError()
                 # logger.debug(f'RECEIVED MSG: {msg}')
             except Exception as e:
-                tracebac = traceback.print_tb()
+                tracebac = traceback.format_exc()
                 self.is_alive = False
-                logger.debug(f'CLOSING WS, didn\'n receive pong: {e}: \n {tracebac}')
-                await ws.close()
+                logger.debug(f'CLOSING WS, didn\'t receive pong: {e}: \n {tracebac}')
+                await self.on_disconnect(ws, 1008)
             await asyncio.sleep(3)
 
     def add_session_to_match(self, ws: WebSocket, match_id: str):
@@ -458,9 +458,12 @@ class MatchMaking(WebSocketEndpoint):
         await sync_to_async(self.broadcast_json)('match-making', {
                 'type': 'updateQueue',
                 'action': 'ADD',
-                **self.userDict
+                **user
             }
         )
+
+        # check to make sure connection is alive
+        self.ticker_task = asyncio.create_task(self.tick(ws))
 
     async def handle_match_response(self, ws: WebSocket, data: dict):
         user_id = data['userId']
@@ -478,7 +481,7 @@ class MatchMaking(WebSocketEndpoint):
         logger.debug(
             f"handle_match_response, match: {match_id} user: {user_id} response: {response}."
         )
-        pub = aioredis.from_url("redis://172.23.109.48/2", decode_responses=True)
+        pub = aioredis.from_url(f"{config.redis_url}/2", decode_responses=True)
         await pub.publish("match_responses", json.dumps(match))
         await pub.close()
 

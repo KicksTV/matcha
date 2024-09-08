@@ -9,7 +9,7 @@ from app.helpers.config import config
 
 logger = logging.getLogger("matcha")
 
-r = Redis(host=config.redis_host, port=6379)
+r = Redis(**config.redis_options)
 
 # sync funcs
 
@@ -20,17 +20,17 @@ def get_all_users() -> dict:
 # async funcs
 
 async def update_ordinal(user_id: str, ordinal: float):
-    conn = await aioredis.from_url(f"redis://{config.redis_host}", encoding="utf-8")
+    conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
     await conn.json().set(f'user:{user_id}', ".ordinal", ordinal)
     await conn.aclose()
 
 async def update_games_played(user_id: str):
-    conn = await aioredis.from_url(f"redis://{config.redis_host}", encoding="utf-8")
+    conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
     await conn.json().numincrby(f'user:{user_id}', ".games_played", 1)
     await conn.aclose()
 
 async def add_user(userDict: dict) -> dict:
-    conn = await aioredis.from_url(f"redis://{config.redis_host}", encoding="utf-8")
+    conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
     user_id = str(userDict['id'])
     user = {
         "id": user_id,

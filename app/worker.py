@@ -22,11 +22,8 @@ logger.addHandler(ch)
 # Redis /1 is used for matchmaking pool
 # Redis /2 is used to put matches found
 
-matchmaking_pool = redis.Redis(host=config.redis_host, port=6379, db=1)
-pub = redis.Redis(host=config.redis_host, port=6379, db=2)
-
-baseUrl = 'http://172.23.109.48:8000' if config.environment == 'debug' else 'https://running-app-efd09e797a8a.herokuapp.com'
-
+matchmaking_pool = redis.Redis(**config.redis_options, db=1)
+pub = redis.Redis(**config.redis_options, db=2)
 
 def publish_match(player_ids):
     logger.debug("Publishing match...")
@@ -39,7 +36,7 @@ def publish_match(player_ids):
     }
     try:
         resp = requests.post(
-            f'{baseUrl}/api/matches/init-match/', data=json.dumps(match_data), headers={'Content-Type': 'application/json'}, timeout=5)
+            f'{config.baseUrl}/api/matches/init-match/', data=json.dumps(match_data), headers={'Content-Type': 'application/json'}, timeout=5)
         
         if resp and resp.ok:
             match_data = resp.json()
