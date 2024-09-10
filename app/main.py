@@ -86,7 +86,7 @@ def queue_data(request):
         users.append(json.loads(r['json']))
     return JSONResponse(users)
 
-pub = redis.Redis(**config.redis_options, db=2)
+pub = redis.Redis(**config.redis_options)
 
 class QueuePubSubListener(object):
     def __init__(self):
@@ -267,7 +267,7 @@ class MatchMaking(WebSocketEndpoint):
             match_making_sessions[self.channel_name] = [websocket]
 
     async def on_disconnect(self, websocket: WebSocket, close_code: int):
-
+        user_id = None
         if self.userDict:
             try:
                 user_id = self.userDict['id']
@@ -481,7 +481,7 @@ class MatchMaking(WebSocketEndpoint):
         logger.debug(
             f"handle_match_response, match: {match_id} user: {user_id} response: {response}."
         )
-        pub = aioredis.from_url(f"{config.redis_url}/2", decode_responses=True)
+        pub = aioredis.from_url(f"{config.redis_url}", decode_responses=True)
         await pub.publish("match_responses", json.dumps(match))
         await pub.close()
 
@@ -619,7 +619,7 @@ def startup():
 if config.environment == "debug":
     allowed_hosts=['127.0.0.1:8002', '172.23.109.48:8002', '192.168.0.38:8002']
 else:
-    allowed_hosts=['https://running-app-efd09e797a8a.herokuapp.com/']
+    allowed_hosts=['*']
 
 middleware = [
     Middleware(

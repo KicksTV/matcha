@@ -48,12 +48,12 @@ async def add_user(userDict: dict) -> dict:
     return user
 
 async def del_user(user_id: str):
-    conn = await aioredis.from_url("redis://172.23.109.48", encoding="utf-8")
+    conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
     user = await conn.json().delete(f'user:{user_id}')
     await conn.aclose()
 
 async def get_user(user_id: str) -> dict:
-    conn = await aioredis.from_url("redis://172.23.109.48", encoding="utf-8")
+    conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
     user = await conn.json().get(f'user:{user_id}')
     await conn.aclose()
     if user:
@@ -62,7 +62,7 @@ async def get_user(user_id: str) -> dict:
         return None
     
 async def add_match(match: dict):
-    conn = await aioredis.from_url("redis://172.23.109.48", encoding="utf-8")
+    conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
     # set the time when queue popped
     match.update({
         'status': 'STARTING',
@@ -76,7 +76,7 @@ async def add_match(match: dict):
     return match
 
 async def get_match(match_id: str):
-    conn = await aioredis.from_url("redis://172.23.109.48", encoding="utf-8")
+    conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
     match = await conn.json().get(f'match:{match_id}')
     await conn.aclose()
     if match:
@@ -85,22 +85,22 @@ async def get_match(match_id: str):
         return None
 
 async def insert_match_response(match_id: str, user_id: str, response: str, index: int):
-    conn = await aioredis.from_url("redis://172.23.109.48", encoding="utf-8")
+    conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
     await conn.json().arrinsert(f'match:{match_id}', "$.responses", index, response)
     await conn.aclose()
 
 async def update_match_response(match_id: str, user_id: str, response: str):
-    conn = await aioredis.from_url("redis://172.23.109.48", encoding="utf-8")
+    conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
     await conn.json().arrappend(f'match:{match_id}', "$.responses", response)
     await conn.aclose()
 
 async def update_match_proceeding(match_id: str, proceeding: bool):
-    conn = await aioredis.from_url("redis://172.23.109.48", encoding="utf-8")
+    conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
     await conn.json().set(f'match:{match_id}', "$.proceeding", proceeding)
     await conn.aclose()
 
 async def get_match_responses(match_id: str):
-    conn = await aioredis.from_url("redis://172.23.109.48", encoding="utf-8")
+    conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
     match = await conn.json().get(f'match:{match_id}')
     await conn.aclose()
     if match:

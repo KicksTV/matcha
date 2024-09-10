@@ -1,9 +1,9 @@
 version: '3.7'
 services:
-  redis:
-    image: redislabs/redismod
-    ports:
-      - 6379:6379
+  # redis:
+  #   image: redislabs/redismod
+  #   ports:
+  #     - 6379:6379
     # command: redis-cli -h 0.0.0.0 -p 6379 flushall
   api:
     ports:
@@ -15,8 +15,8 @@ services:
     environment:
       PYTHONPATH: .
       MATCHA_ENVIRONMENT: debug
-    depends_on:
-      - "redis"
+    # depends_on:
+    #   - "redis"
   worker:
     ports:
     - '8003:8003'
@@ -26,5 +26,5 @@ services:
     environment:
       PYTHONPATH: .
     command: python app/worker.py
-    depends_on:
-      - "redis"
+    # depends_on:
+    #   - "redis"

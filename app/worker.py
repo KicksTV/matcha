@@ -22,8 +22,8 @@ logger.addHandler(ch)
 # Redis /1 is used for matchmaking pool
 # Redis /2 is used to put matches found
 
-matchmaking_pool = redis.Redis(**config.redis_options, db=1)
-pub = redis.Redis(**config.redis_options, db=2)
+matchmaking_pool = redis.Redis(**config.redis_options)
+pub = redis.Redis(**config.redis_options)
 
 def publish_match(player_ids):
     logger.debug("Publishing match...")
