@@ -16,10 +16,9 @@ r = Redis(**config.redis_options)
 
 async def _put_user_queue(user_id: str, user_ordinal: float):
     redis = await aioredis.from_url(f"{config.redis_url}")
-    logger.debug(f"adding rank to queue: {user_ordinal}")
+    # logger.debug(f"adding rank to queue: {user_ordinal}")
     await redis.zadd("matchmaking_pool", {user_id: user_ordinal})
     await redis.zadd("matchmaking_time", {user_id: time.time()})
-
     await redis.aclose()
 
 async def _get_match(channel: aioredis.client.PubSub, user_id: str):

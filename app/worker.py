@@ -10,7 +10,7 @@ import redis
 
 from threading import Timer
 
-from app.helpers.db import add_match, get_match
+from app.helpers.db import add_match, get_match, get_user
 from app.helpers.config import config
 
 logger = logging.getLogger("matcha_worker")
@@ -30,11 +30,13 @@ def publish_match(player_ids):
 
     # create match sql record
     match_data = {
-        'players': [pid.decode('utf-8') for pid in player_ids],
+        'players': [asyncio.run(get_user(pid.decode('utf-8'))) for pid in player_ids],
         'status': 'STARTING',
         'createdOn': time.time()
     }
+    # logger.debug(json.dumps(match_data))
     try:
+        # logger.debug(config.baseUrl)
         resp = requests.post(
             f'{config.baseUrl}/api/matches/init-match/', data=json.dumps(match_data), headers={'Content-Type': 'application/json'}, timeout=5)
         
@@ -52,8 +54,10 @@ def publish_match(player_ids):
             logger.debug('FAILED TO CREATE SQL MATCH')
             logger.debug(resp.reason)
             logger.debug(resp.content)
-    except:
+    except Exception as e:
         logger.error('Failed to save sql match')
+        logger.error(e)
+
     
 
 def queue_time_out(match):

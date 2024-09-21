@@ -38,11 +38,12 @@ async def add_user(userDict: dict) -> dict:
         "firstName": userDict['player']['firstName'],
         "lastName": userDict['player']['lastName'],
         "gender": userDict['player']['gender'],
+        "dob": userDict['player']['dob'],
         "rank": userDict['player']['rank'],
         "ordinal": userDict['player']['ordinal'],
         "queueStart": time.time()
     }
-    logger.debug(f"Adding {user} to database")
+    # logger.debug(f"Adding {user} to database")
     await conn.json().set(f'user:{user_id}', "$", user)
     await conn.aclose()
     return user
@@ -69,7 +70,7 @@ async def add_match(match: dict):
         'proceeding': False,
         'responses': ['' for i in range(len(match['players']))],
     })
-    logger.debug(f"Adding match {match} to database.")
+    # logger.debug(f"Adding match {match} to database.")
     match_id = match["id"]
     await conn.json().set(f'match:{match_id}', "$", match)
     await conn.aclose()
@@ -86,7 +87,7 @@ async def get_match(match_id: str):
 
 async def insert_match_response(match_id: str, user_id: str, response: str, index: int):
     conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
-    await conn.json().arrinsert(f'match:{match_id}', "$.responses", index, response)
+    await conn.json().set(f'match:{match_id}', f"$.responses[{index}]", response)
     await conn.aclose()
 
 async def update_match_response(match_id: str, user_id: str, response: str):

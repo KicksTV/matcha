@@ -88,6 +88,9 @@ def queue_data(request):
 
 pub = redis.Redis(**config.redis_options)
 
+
+logger.debug(config.redis_options)
+
 class QueuePubSubListener(object):
     def __init__(self):
         self.clients = {}
@@ -105,6 +108,7 @@ class QueuePubSubListener(object):
             logger.error(f'{user_id} already exists in QueuePubSubListener clients list. They should not be allowed to join queue if already searching!!!')
 
     def unregister(self, user_id: str):
+        logger.debug(type(user_id))
         if user_id in self.clients:
             del self.clients[user_id]
         else:
@@ -118,7 +122,8 @@ class QueuePubSubListener(object):
 
             # notify all players that a match was found for them
             missing_players = []
-            for pid in match["players"]:
+            for player in match["players"]:
+                pid = player['id']
                 if pid in self.clients:
                     ws = self.clients[pid]
                     MatchMaking.handle_match_found(pid, ws, match)
@@ -186,7 +191,8 @@ class MatchPubSubListener(object):
                 all_players_responded = True
                 asyncio.run(update_match_proceeding(match_id, proceeding=False))
 
-                for pid in match['players']:
+                for player in match['players']:
+                    pid = player['id']
                     if pid in self.clients:
                         ws = self.clients[pid]
                         MatchMaking.handle_match_status(pid, ws, match)
@@ -206,7 +212,8 @@ class MatchPubSubListener(object):
             if all_players_responded:
                 # send players a message that the match will start
                 missing_players = []
-                for pid in match['players']:
+                for player in match['players']:
+                    pid = player['id']
                     if pid in self.clients:
                         ws = self.clients[pid]
                         MatchMaking.handle_match_status(pid, ws, match)
@@ -306,11 +313,11 @@ class MatchMaking(WebSocketEndpoint):
         await websocket.close(code=1008)
 
     async def on_receive(self, ws, data):
-        logger.debug(f"Received ws msg with data {data}.")
+        # logger.debug(f"Received ws msg with data {data}.")
         data = json.loads(data)
 
         if data['type'] == 'pong':
-            logger.debug('Received PONG')
+            # logger.debug('Received PONG')
             self.received_pong = True
             return
         
@@ -319,7 +326,7 @@ class MatchMaking(WebSocketEndpoint):
             return
 
         user = await get_user(str(data['userId']))
-        logger.debug(f"Fetched user: {user}")
+        # logger.debug(f"Fetched user: {user}")
 
         if data['type'] == 'matchResponse':
             await self.handle_match_response(ws, data)
@@ -343,7 +350,7 @@ class MatchMaking(WebSocketEndpoint):
         # counter = 0
         while self.is_alive:
             try:
-                logger.debug('Sending PING')
+                # logger.debug('Sending PING')
                 await asyncio.wait_for(ws.send_json({"type": 'ping'}), HEART_BEAT_INTERVAL)
                 # await asyncio.wait_for(self.received_pong(), HEART_BEAT_INTERVAL)
 
@@ -382,8 +389,10 @@ class MatchMaking(WebSocketEndpoint):
 
     @staticmethod
     def handle_match_found(user_id: str, ws: WebSocket, match: dict):
-        asyncio.run(ws.send_json({'type': 'matchFound', 'match': match}))
-
+        try:
+            asyncio.run(ws.send_json({'type': 'matchFound', 'match': match}))
+        except:
+            logger.error("Tried to send a match found response but Websocket is closed. Have we not removed a ws from queue?")
         user_dict = asyncio.run(get_user(user_id))
 
         # subscribe to match listener
@@ -405,10 +414,11 @@ class MatchMaking(WebSocketEndpoint):
 
         if match['proceeding']:
             # remove them from queue
+            logger.debug("Match starting - remove players from queue")
             queue_listener.unregister(user_id)
             queue_listener.remove_user(user_id)
-            match_listener.unregister(user_id)
-            match_listener.remove_user(user_id)
+            # match_listener.unregister(user_id)
+            # match_listener.remove_user(user_id)
 
             asyncio.run(
                 del_user(user_id))
@@ -435,9 +445,10 @@ class MatchMaking(WebSocketEndpoint):
         self.userDict = data['user']
         logger.debug(self.userDict)
         user_id = str(self.userDict["id"])
+        self.userDict["id"] = user_id
         player = self.userDict["player"]
         ordinal = float(player["ordinal"])
-        logger.debug(f"Rating for {user_id} is {ordinal}.")
+        # logger.debug(f"Rating for {user_id} is {ordinal}.")
         if not user_id:
             await ws.close(code=1008)
         user = await get_user(user_id)
@@ -445,7 +456,7 @@ class MatchMaking(WebSocketEndpoint):
         if not user:
             user = await add_user(self.userDict)
         else:
-            logger.debug(f"Updating ordinal {ordinal} for {user_id}.")
+            # logger.debug(f"Updating ordinal {ordinal} for {user_id}.")
             await update_ordinal(user_id, ordinal)
         
         await _put_user_queue(user_id, ordinal)
@@ -453,7 +464,7 @@ class MatchMaking(WebSocketEndpoint):
         # register to queue listener
         queue_listener.register(ws, user_id)
 
-        logger.debug(f"Registered user into queue: {user}")
+        # logger.debug(f"Registered user into queue: {user}")
 
         await sync_to_async(self.broadcast_json)('match-making', {
                 'type': 'updateQueue',
@@ -466,17 +477,23 @@ class MatchMaking(WebSocketEndpoint):
         self.ticker_task = asyncio.create_task(self.tick(ws))
 
     async def handle_match_response(self, ws: WebSocket, data: dict):
-        user_id = data['userId']
+        user_id = str(data['userId'])
         match_id = data['matchId']
         response = data['response']
 
         match = await get_match(match_id)
 
-        index = match['players'].index(user_id)
+        index = None
+        for i, player in enumerate(match['players']):
+            pid = player['id']
+            if pid == user_id:
+                index = i
+        
+        assert index is not None
 
         await insert_match_response(match_id, user_id, response, index)
 
-        match['responses'].insert(3, response)
+        match['responses'][index] = response
 
         logger.debug(
             f"handle_match_response, match: {match_id} user: {user_id} response: {response}."
@@ -507,109 +524,109 @@ class MatchMaking(WebSocketEndpoint):
 
 
 
-async def queue(websocket):
-        user = str(websocket.query_params["user"])
-        logger.debug(user)
-        userDict = json.loads(user)
-        logger.debug(userDict)
-        user_id = str(userDict["id"])
-        player = userDict["player"]
-        ordinal = player["ordinal"]
-        ordinal = float(ordinal)
-        logger.debug(f"Rating for {user_id} is {ordinal}.")
-        if not user_id:
-            await websocket.close(code=1008)
+# async def queue(websocket):
+#         user = str(websocket.query_params["user"])
+#         logger.debug(user)
+#         userDict = json.loads(user)
+#         logger.debug(userDict)
+#         user_id = str(userDict["id"])
+#         player = userDict["player"]
+#         ordinal = player["ordinal"]
+#         ordinal = float(ordinal)
+#         logger.debug(f"Rating for {user_id} is {ordinal}.")
+#         if not user_id:
+#             await websocket.close(code=1008)
 
-        user = await get_user(user_id)
+#         user = await get_user(user_id)
 
-        # Add user to databaase as guest if not yet registered
-        if not user:
-            user = await add_user(userDict)
-        else:
-            logger.debug(f"Updating ordinal {ordinal} for {user_id}.")
-            await update_ordinal(user_id, ordinal)
+#         # Add user to databaase as guest if not yet registered
+#         if not user:
+#             user = await add_user(userDict)
+#         else:
+#             logger.debug(f"Updating ordinal {ordinal} for {user_id}.")
+#             await update_ordinal(user_id, ordinal)
         
-        await websocket.accept()
+#         await websocket.accept()
 
-        logger.debug(f"Adding {user} to the queue.")
+#         logger.debug(f"Adding {user} to the queue.")
 
-        # Add user to the queue
-        search_match_task = asyncio.create_task(search_match(user))
+#         # Add user to the queue
+#         search_match_task = asyncio.create_task(search_match(user))
         
-        async def check_queue_status(func):
-            is_alive = await func
-            if not is_alive:
-                print(f"connection no longer alive, removing {user} from queue")
-                # we cancel if we find the connection has been disconnected
-                search_match_task.cancel()
-                await del_user(user_id)
-                await websocket.close()
-            return is_alive
+#         async def check_queue_status(func):
+#             is_alive = await func
+#             if not is_alive:
+#                 print(f"connection no longer alive, removing {user} from queue")
+#                 # we cancel if we find the connection has been disconnected
+#                 search_match_task.cancel()
+#                 await del_user(user_id)
+#                 await websocket.close()
+#             return is_alive
             
             
-        async def check_queue_status_again():
-            try:
-                await asyncio.sleep(3)
-                check_ws_alive_task = asyncio.create_task(is_websocket_active(websocket))
-                is_alive = await check_queue_status(check_ws_alive_task)
-                return is_alive
-            except CancelledError:
-                print("Is alive check cancelled probably found match!")
-                return False
+#         async def check_queue_status_again():
+#             try:
+#                 await asyncio.sleep(3)
+#                 check_ws_alive_task = asyncio.create_task(is_websocket_active(websocket))
+#                 is_alive = await check_queue_status(check_ws_alive_task)
+#                 return is_alive
+#             except CancelledError:
+#                 print("Is alive check cancelled probably found match!")
+#                 return False
 
-        async def aa():
-            while not search_match_task.done():
-                is_alive = await check_queue_status_again()
-                if not is_alive:
-                    break
+#         async def aa():
+#             while not search_match_task.done():
+#                 is_alive = await check_queue_status_again()
+#                 if not is_alive:
+#                     break
                 
-            print("not search_match_task.done()", not search_match_task.done())
-            if not is_alive and not search_match_task.done():
-                return None
-            return search_match_task.result()
+#             print("not search_match_task.done()", not search_match_task.done())
+#             if not is_alive and not search_match_task.done():
+#                 return None
+#             return search_match_task.result()
 
         
-        aaa = asyncio.create_task(aa())
+#         aaa = asyncio.create_task(aa())
 
-        def found_match(task):
-            print("found match, cancel is_alive check")
-            aaa.cancel()
-        search_match_task.add_done_callback(found_match)
+#         def found_match(task):
+#             print("found match, cancel is_alive check")
+#             aaa.cancel()
+#         search_match_task.add_done_callback(found_match)
 
-        match = await aaa
+#         match = await aaa
 
-        if not match:
-            print("is_alive is false")
-            return
+#         if not match:
+#             print("is_alive is false")
+#             return
 
 
-        logger.debug(f"Got a match response: {match}.")
-        # Return room  id to user when match is found
-        match_response = {"type": "matchFound", "match": match}
-        logger.debug(f"Got a match response: {match_response}.")
-        await websocket.send_json(match_response)
+#         logger.debug(f"Got a match response: {match}.")
+#         # Return room  id to user when match is found
+#         match_response = {"type": "matchFound", "match": match}
+#         logger.debug(f"Got a match response: {match_response}.")
+#         await websocket.send_json(match_response)
 
-        # create the match in sql
+#         # create the match in sql
         
 
-        # now listen for match responses
-        # await for response to accepting the match
-        match = await match_responses(match['id'], user_id)
-        # logger.debug(f"{match}.")
+#         # now listen for match responses
+#         # await for response to accepting the match
+#         match = await match_responses(match['id'], user_id)
+#         # logger.debug(f"{match}.")
 
-        match_response = {
-            'type': 'matchResponse',
-            'proceeding': match['proceeding'],
-            'match': match
-        }
-        if match['proceeding']:
-            logger.debug(f"Match is proceeding: {match_response}.")
-        else:
-            logger.debug(f"Match will not be proceeding: {match_response}.")
+#         match_response = {
+#             'type': 'matchResponse',
+#             'proceeding': match['proceeding'],
+#             'match': match
+#         }
+#         if match['proceeding']:
+#             logger.debug(f"Match is proceeding: {match_response}.")
+#         else:
+#             logger.debug(f"Match will not be proceeding: {match_response}.")
             
-        await websocket.send_json(match_response)
-        await del_user(user_id)
-        await websocket.close()
+#         await websocket.send_json(match_response)
+#         await del_user(user_id)
+#         await websocket.close()
 
 
 def startup():
