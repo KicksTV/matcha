@@ -108,7 +108,6 @@ class QueuePubSubListener(object):
             logger.error(f'{user_id} already exists in QueuePubSubListener clients list. They should not be allowed to join queue if already searching!!!')
 
     def unregister(self, user_id: str):
-        logger.debug(type(user_id))
         if user_id in self.clients:
             del self.clients[user_id]
         else:
@@ -183,7 +182,8 @@ class MatchPubSubListener(object):
             match_id = match['id']
 
             if 'timedout' in match and match['timedout']:
-                if len(match['players']) == len(match['responses']):
+                responses = [r for r in match['responses'] if r != ""]
+                if len(match['players']) == len(responses):
                     # already handled match
                     return
                 logger.debug(f"Not all players responded in time. Match cancelled!")
@@ -204,7 +204,7 @@ class MatchPubSubListener(object):
                 logger.debug(f"All players have ACCEPTED the queue pop.")
                 match['proceeding'] = True
                 all_players_responded = True
-            elif len(match["responses"]) == config.players_per_match:
+            elif len(list(filter(lambda r: r != "", match["responses"]))) == config.players_per_match:
                 logger.debug(f"All players have responded BUT not all accepted. Match cancelled!")
                 match['proceeding'] = False
                 all_players_responded = True
@@ -369,14 +369,21 @@ class MatchMaking(WebSocketEndpoint):
                 await self.on_disconnect(ws, 1008)
             await asyncio.sleep(3)
 
-    def add_session_to_match(self, ws: WebSocket, match_id: str):
-        if match_id in match_making_sessions:
-            match_making_sessions[f'match:{match_id}'].append(ws)
+    @staticmethod
+    def add_session_to_match(ws: WebSocket, match_id: str):
+        session_key = f'match:{match_id}'
+        if session_key in match_making_sessions:
+            match_making_sessions[session_key].append(ws)
         else:
-            match_making_sessions[f'match:{match_id}'] = [ws]
+            match_making_sessions[session_key] = [ws]
+    
+    @staticmethod
+    def get_match_sessions(match_id: str) -> dict:
+        return match_making_sessions[f'match:{match_id}']
 
     @staticmethod
     def broadcast_json(channel: str,  json: dict):
+        logger.debug(f"Broadcasting json: {json}")
         if channel in match_making_sessions:
             for ws in list(match_making_sessions[channel]):
                 try:
@@ -414,7 +421,7 @@ class MatchMaking(WebSocketEndpoint):
 
         if match['proceeding']:
             # remove them from queue
-            logger.debug("Match starting - remove players from queue")
+            logger.debug(f"Match starting - remove player {user_id} from queue")
             queue_listener.unregister(user_id)
             queue_listener.remove_user(user_id)
             # match_listener.unregister(user_id)
@@ -426,9 +433,15 @@ class MatchMaking(WebSocketEndpoint):
             MatchMaking.broadcast_json('match-making',
                                     {"type": "updateQueue", "action": "REMOVE", "user": user})
 
-            # self.add_session_to_match(ws, match['id'])
+            MatchMaking.add_session_to_match(ws, match['id'])
         else:
-            index = match['players'].index(user_id)
+            index = None
+            for i, player in enumerate(match['players']):
+                if player['id'] == user_id:
+                    index = i
+            
+            assert index is not None
+
             response = match['responses'][index]
             if response == 'DECLINED':
                 queue_listener.unregister(user_id)
@@ -503,6 +516,7 @@ class MatchMaking(WebSocketEndpoint):
         await pub.close()
 
     async def handle_match_result(self, ws: WebSocket, result: dict):
+        logger.debug("Received match result")
         # {
         #   'type': 'matchResult',
         #   'playerId': `${userID.value}`,
@@ -516,10 +530,10 @@ class MatchMaking(WebSocketEndpoint):
         #        'disqualification': '',
         #     }
         # }
-        match_id = result['match']
-        await sync_to_async(self.broadcast_json)(
+        match_id = result['matchId']
+        await sync_to_async(MatchMaking.broadcast_json)(
             f'match:{match_id}',
-            {"type": "MatchResult", "result": result}
+            result
         )
 
 

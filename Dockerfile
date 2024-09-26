@@ -22,10 +22,6 @@ RUN mkdir -p /var/log/supervisor
 
 COPY supervisord.conf supervisord.conf
 
-COPY start_api start_api
-
-COPY start_worker start_worker
-
 EXPOSE 8002
 
 CMD ["/usr/bin/supervisord"]
