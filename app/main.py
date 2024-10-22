@@ -108,7 +108,6 @@ class QueuePubSubListener(object):
             logger.error(f'{user_id} already exists in QueuePubSubListener clients list. They should not be allowed to join queue if already searching!!!')
 
     def unregister(self, user_id: str):
-        logger.debug(type(user_id))
         if user_id in self.clients:
             del self.clients[user_id]
         else:
@@ -183,7 +182,8 @@ class MatchPubSubListener(object):
             match_id = match['id']
 
             if 'timedout' in match and match['timedout']:
-                if len(match['players']) == len(match['responses']):
+                responses = [r for r in match['responses'] if r != ""]
+                if len(match['players']) == len(responses):
                     # already handled match
                     return
                 logger.debug(f"Not all players responded in time. Match cancelled!")
@@ -420,7 +420,7 @@ class MatchMaking(WebSocketEndpoint):
 
         if match['proceeding']:
             # remove them from queue
-            logger.debug("Match starting - remove players from queue")
+            logger.debug(f"Match starting - remove player {user_id} from queue")
             queue_listener.unregister(user_id)
             queue_listener.remove_user(user_id)
             # match_listener.unregister(user_id)
@@ -434,7 +434,13 @@ class MatchMaking(WebSocketEndpoint):
 
             MatchMaking.add_session_to_match(ws, match['id'])
         else:
-            index = match['players'].index(user_id)
+            index = None
+            for i, player in enumerate(match['players']):
+                if player['id'] == user_id:
+                    index = i
+            
+            assert index is not None
+
             response = match['responses'][index]
             if response == 'DECLINED':
                 queue_listener.unregister(user_id)
@@ -511,6 +517,7 @@ class MatchMaking(WebSocketEndpoint):
         await pub.close()
 
     async def handle_match_result(self, ws: WebSocket, result: dict):
+        logger.debug("Received match result")
         # {
         #   'type': 'matchResult',
         #   'playerId': `${userID.value}`,
