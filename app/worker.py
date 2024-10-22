@@ -7,10 +7,11 @@ import signal
 import secrets
 import sys
 import redis
+import random
 
 from threading import Timer
 
-from app.helpers.db import add_match, get_match, get_user
+from app.helpers.db import add_match, get_match, aget_user, get_user
 from app.helpers.config import config
 
 logger = logging.getLogger("matcha_worker")
@@ -25,13 +26,14 @@ logger.addHandler(ch)
 matchmaking_pool = redis.Redis(**config.redis_options)
 pub = redis.Redis(**config.redis_options)
 
-def publish_match(player_ids):
+def publish_match(player_ids: list, event: str):
     logger.debug("Publishing match...")
 
     # create match sql record
     match_data = {
-        'players': [asyncio.run(get_user(pid.decode('utf-8'))) for pid in player_ids],
+        'players': [asyncio.run(aget_user(pid.decode('utf-8'))) for pid in player_ids],
         'status': 'STARTING',
+        'event': event,
         'createdOn': time.time()
     }
     # logger.debug(json.dumps(match_data))
@@ -86,7 +88,15 @@ def find_matches():
 
         # Using the player ID we can retrieve it's ELO.
         player_rank = matchmaking_pool.zscore("matchmaking_pool", player_id)
+        player_data = get_user(player_id.decode())
+        if not player_data:
+            logger.error(f'No player data for {player_id}')
+            continue
+        player_events = player_data['events']
+
         logger.info(f"Player Rank: {player_rank}")
+        logger.info(f"Player Events: {player_events}")
+
         # When the player has stopped queueing it won't be present
         if not player_rank and player_rank != 0.0:
             logger.info(f"No rank.... skipping: {player}")
@@ -117,6 +127,8 @@ def find_matches():
             if opponent_id == player_id:
                 continue
 
+            opponent_rank = opponent[1]
+
             logger.info(f"opponent: {opponent}")
             # Now we go the opposite direction, using the ID we retrieve the opponent's time in the queue.
 
@@ -137,7 +149,6 @@ def find_matches():
             # after 30 seconds the range should widen to match against a wider range of opponents.
             opponent_rank_range = min(3 * (1 + 25 / 100) ** int(player_time_in_queue / 40), 12)
             logger.info(f"opponent_rank_range: {opponent_rank_range}")
-            opponent_rank = opponent[1]
 
             logger.info(f"Opponent Rank: {opponent_rank}")
 
@@ -146,6 +157,29 @@ def find_matches():
             if (opponent_rank - opponent_rank_range) <= player_rank <= (
                 opponent_rank + opponent_rank_range
             ) and player_id != opponent_id and len(possible_opponents) <= config.players_per_match-1:
+                
+                opponent_data = get_user(opponent_id.decode())
+                if not opponent_data:
+                    logger.error(f'No player data for {opponent_id}')
+                    continue
+                opponent_events = opponent_data['events']
+
+                logger.info(f"Opponent Events: {opponent_events}")
+
+                # check if opponent wants to compeat in same events
+                common_events = []
+                for event in opponent_events:
+                    if event in player_events:
+                        common_events.append(event)
+                
+                if not len(common_events):
+                    continue
+
+                # randomly pick an event
+                random_num = random.randint(0,(len(common_events)-1))
+
+                event = common_events[random_num]
+
                 possible_opponent = {
                     "id": opponent_id,
                     "time_in_queue": opponent_time_in_queue,
@@ -172,7 +206,7 @@ def find_matches():
                 player_ids.append(possible_opponents[i]["id"])
 
             # Return the opponent that has been queueing the longest
-            publish_match(player_ids)
+            publish_match(player_ids, event)
 
 
 def terminate(signal, frame):

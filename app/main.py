@@ -29,7 +29,7 @@ from app.helpers.db import (
     add_user,
     del_user,
     get_all_users,
-    get_user,
+    aget_user,
     update_games_played,
     update_match_response,
     insert_match_response,
@@ -204,7 +204,7 @@ class MatchPubSubListener(object):
                 logger.debug(f"All players have ACCEPTED the queue pop.")
                 match['proceeding'] = True
                 all_players_responded = True
-            elif len(match["responses"]) == config.players_per_match:
+            elif len(list(filter(lambda r: r != "", match["responses"]))) == config.players_per_match:
                 logger.debug(f"All players have responded BUT not all accepted. Match cancelled!")
                 match['proceeding'] = False
                 all_players_responded = True
@@ -223,6 +223,8 @@ class MatchPubSubListener(object):
                 if len(missing_players):
                     logger.error(f'Player missing from MatchPubSubListener: {missing_players}')
 
+        else:
+            logger.error("Message is None!")
         # if type(_message) != int:
         #     self.send(_message)
 
@@ -325,7 +327,7 @@ class MatchMaking(WebSocketEndpoint):
             await self.handle_join_queue(ws, data)
             return
 
-        user = await get_user(str(data['userId']))
+        user = await aget_user(str(data['userId']))
         # logger.debug(f"Fetched user: {user}")
 
         if data['type'] == 'matchResponse':
@@ -369,14 +371,18 @@ class MatchMaking(WebSocketEndpoint):
                 await self.on_disconnect(ws, 1008)
             await asyncio.sleep(3)
 
-    def add_session_to_match(self, ws: WebSocket, match_id: str):
-        if match_id in match_making_sessions:
-            match_making_sessions[f'match:{match_id}'].append(ws)
+    @staticmethod
+    def add_session_to_match(ws: WebSocket, match_id: str):
+        match_key = f'match:{match_id}'
+        if match_key in match_making_sessions:
+            match_making_sessions[match_key].append(ws)
         else:
-            match_making_sessions[f'match:{match_id}'] = [ws]
+            match_making_sessions[match_key] = [ws]
 
     @staticmethod
     def broadcast_json(channel: str,  json: dict):
+        logger.debug(f'Received data for channel {channel} to broadcast: {json}')
+        logger.debug(f'match_making_sessions: {match_making_sessions}')
         if channel in match_making_sessions:
             for ws in list(match_making_sessions[channel]):
                 try:
@@ -393,7 +399,7 @@ class MatchMaking(WebSocketEndpoint):
             asyncio.run(ws.send_json({'type': 'matchFound', 'match': match}))
         except:
             logger.error("Tried to send a match found response but Websocket is closed. Have we not removed a ws from queue?")
-        user_dict = asyncio.run(get_user(user_id))
+        user_dict = asyncio.run(aget_user(user_id))
 
         # subscribe to match listener
         match_listener.register(ws, user_id)
@@ -410,7 +416,7 @@ class MatchMaking(WebSocketEndpoint):
             })
         )
 
-        user = asyncio.run(get_user(user_id))
+        user = asyncio.run(aget_user(user_id))
 
         if match['proceeding']:
             # remove them from queue
@@ -426,7 +432,7 @@ class MatchMaking(WebSocketEndpoint):
             MatchMaking.broadcast_json('match-making',
                                     {"type": "updateQueue", "action": "REMOVE", "user": user})
 
-            # self.add_session_to_match(ws, match['id'])
+            MatchMaking.add_session_to_match(ws, match['id'])
         else:
             index = match['players'].index(user_id)
             response = match['responses'][index]
@@ -448,10 +454,12 @@ class MatchMaking(WebSocketEndpoint):
         self.userDict["id"] = user_id
         player = self.userDict["player"]
         ordinal = float(player["ordinal"])
+        events = self.userDict["events"]
+
         # logger.debug(f"Rating for {user_id} is {ordinal}.")
         if not user_id:
             await ws.close(code=1008)
-        user = await get_user(user_id)
+        user = await aget_user(user_id)
         # Add user to databaase as guest if not yet registered
         if not user:
             user = await add_user(self.userDict)
@@ -516,11 +524,20 @@ class MatchMaking(WebSocketEndpoint):
         #        'disqualification': '',
         #     }
         # }
-        match_id = result['match']
-        await sync_to_async(self.broadcast_json)(
-            f'match:{match_id}',
-            {"type": "MatchResult", "result": result}
-        )
+        try:
+            match_id = result['matchId']
+            # await sync_to_async(self.broadcast_json)(
+            #     f'match:{match_id}',
+            #     {"type": "matchResult", "result": result}
+            # )
+            await sync_to_async(self.broadcast_json)(
+                f'match:{match_id}',
+                result
+            )
+        except Exception as e:
+            logger.debug(f'Got error: {e}')
+            logger.debug(f'Received result: {result}')
+
 
 
 
@@ -537,7 +554,7 @@ class MatchMaking(WebSocketEndpoint):
 #         if not user_id:
 #             await websocket.close(code=1008)
 
-#         user = await get_user(user_id)
+#         user = await aget_user(user_id)
 
 #         # Add user to databaase as guest if not yet registered
 #         if not user:

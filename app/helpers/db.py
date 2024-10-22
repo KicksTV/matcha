@@ -16,6 +16,13 @@ r = Redis(**config.redis_options)
 def get_all_users() -> dict:
     results = r.ft().search(Query("*"))
     return results.docs
+
+def get_user(user_id: str) -> dict:
+    user = r.json().get(f'user:{user_id}')
+    if user:
+        return user
+    else:
+        return None
     
 # async funcs
 
@@ -41,6 +48,7 @@ async def add_user(userDict: dict) -> dict:
         "dob": userDict['player']['dob'],
         "rank": userDict['player']['rank'],
         "ordinal": userDict['player']['ordinal'],
+        "events": userDict['events'],
         "queueStart": time.time()
     }
     # logger.debug(f"Adding {user} to database")
@@ -53,7 +61,7 @@ async def del_user(user_id: str):
     user = await conn.json().delete(f'user:{user_id}')
     await conn.aclose()
 
-async def get_user(user_id: str) -> dict:
+async def aget_user(user_id: str) -> dict:
     conn = await aioredis.from_url(f"{config.redis_url}", encoding="utf-8")
     user = await conn.json().get(f'user:{user_id}')
     await conn.aclose()
