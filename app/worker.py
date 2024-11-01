@@ -64,7 +64,7 @@ def publish_match(player_ids: list, event: str):
 
 def queue_time_out(match):
     match = asyncio.run(get_match(match['id']))
-    if len(match['players']) == len(match['responses']):
+    if len(match['players']) == len(list(filter(lambda r: r != "", match["responses"]))):
         # everyone responded, no need to continue
         return
     logger.debug(f"Queue timed out. Match will now be cancelled!")

@@ -14,11 +14,18 @@ logger = logging.getLogger("matcha")
 
 r = Redis(**config.redis_options)
 
-async def _put_user_queue(user_id: str, user_ordinal: float):
+async def _put_user_queue(user_id: str, user_ordinal: float, t: float = time.time()):
     redis = await aioredis.from_url(f"{config.redis_url}")
     # logger.debug(f"adding rank to queue: {user_ordinal}")
     await redis.zadd("matchmaking_pool", {user_id: user_ordinal})
-    await redis.zadd("matchmaking_time", {user_id: time.time()})
+    await redis.zadd("matchmaking_time", {user_id: t})
+    await redis.aclose()
+
+async def _remove_user_queue(user_id: str):
+    redis = await aioredis.from_url(f"{config.redis_url}")
+    # logger.debug(f"adding rank to queue: {user_ordinal}")
+    await redis.zrem("matchmaking_time", user_id)
+    await redis.zrem("matchmaking_pool", user_id)
     await redis.aclose()
 
 async def _get_match(channel: aioredis.client.PubSub, user_id: str):

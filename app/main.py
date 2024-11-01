@@ -37,7 +37,8 @@ from app.helpers.db import (
     get_match,
 )
 from app.helpers.elo import calculate_new_rating
-from app.helpers.matchmaking import search_match, start_match, match_responses, match_finished, match_result, _put_user_queue
+from app.helpers.matchmaking import (
+    search_match, start_match, match_responses, match_finished, match_result, _put_user_queue, _remove_user_queue)
 from app.helpers.config import config
 from app.helpers.create_indexes import create_indexes
 
@@ -308,6 +309,8 @@ class MatchMaking(WebSocketEndpoint):
             except Exception as e:
                 pass
 
+            _remove_user_queue(user_id)
+
             await sync_to_async(self.broadcast_json)(
                 self.channel_name,
                 {"type": "updateQueue", "action": "REMOVE", "user": self.userDict}
@@ -325,6 +328,10 @@ class MatchMaking(WebSocketEndpoint):
         
         if data['type'] == 'joinQueue':
             await self.handle_join_queue(ws, data)
+            return
+        
+        if data['type'] == 'leaveQueue':
+            await self.handle_leave_queue(ws, data)
             return
 
         user = await aget_user(str(data['userId']))
@@ -412,6 +419,7 @@ class MatchMaking(WebSocketEndpoint):
             ws.send_json({
                 'type': 'matchResponse',
                 'proceeding': match['proceeding'],
+                'timedout': match['timedout'],
                 'match': match
             })
         )
@@ -442,16 +450,49 @@ class MatchMaking(WebSocketEndpoint):
             assert index is not None
 
             response = match['responses'][index]
-            if response == 'DECLINED':
+            if response in ['DECLINED', '', 'AWAITING']:
                 queue_listener.unregister(user_id)
                 queue_listener.remove_user(user_id)
 
+                asyncio.run(
+                    del_user(user_id))
+                
+                MatchMaking.broadcast_json('match-making', {
+                    'type': 'updateQueue',
+                    'action': 'REMOVE',
+                    **user
+                })
+
             else:
                 # TODO: add them back into queue
-                asyncio.run(_put_user_queue(user_id, user['ordinal']))
+                asyncio.run(_put_user_queue(user_id, user['ordinal'], user['queueStart']))
 
             match_listener.unregister(user_id)
             match_listener.remove_user(user_id)
+
+    async def handle_leave_queue(self, ws, data):
+        logger.debug('Removing user from queue')
+        user_id = str(self.userDict["userId"])
+        # logger.debug(f"Rating for {user_id} is {ordinal}.")
+        if not user_id:
+            await ws.close(code=1008)
+        user = await aget_user(user_id)
+        
+        queue_listener.remove_user(user_id)
+        queue_listener.unregister(user_id)
+
+        # logger.debug(f"Registered user into queue: {user}")
+
+        _remove_user_queue(user_id)
+
+        del_user(user_id)
+
+        sync_to_async(self.broadcast_json)('match-making', {
+                'type': 'updateQueue',
+                'action': 'REMOVE',
+                **user
+            }
+        )
 
     async def handle_join_queue(self, ws, data):
         self.userDict = data['user']

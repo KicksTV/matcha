@@ -76,6 +76,7 @@ async def add_match(match: dict):
     match.update({
         'status': 'STARTING',
         'proceeding': False,
+        'timedout': False,
         'responses': ['' for i in range(len(match['players']))],
     })
     # logger.debug(f"Adding match {match} to database.")
