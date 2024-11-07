@@ -528,7 +528,7 @@ class MatchMaking(WebSocketEndpoint):
         await sync_to_async(self.broadcast_json)('match-making', {
                 'type': 'updateQueue',
                 'action': 'ADD',
-                **user
+                'user': {**user}
             }
         )
 
