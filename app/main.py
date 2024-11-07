@@ -460,7 +460,9 @@ class MatchMaking(WebSocketEndpoint):
                 MatchMaking.broadcast_json('match-making', {
                     'type': 'updateQueue',
                     'action': 'REMOVE',
-                    **user
+                    "user": {
+                        **user
+                    }
                 })
 
             else:
@@ -472,7 +474,7 @@ class MatchMaking(WebSocketEndpoint):
 
     async def handle_leave_queue(self, ws, data):
         logger.debug('Removing user from queue')
-        user_id = str(self.userDict["userId"])
+        user_id = str(data["userId"])
         # logger.debug(f"Rating for {user_id} is {ordinal}.")
         if not user_id:
             await ws.close(code=1008)
@@ -490,7 +492,9 @@ class MatchMaking(WebSocketEndpoint):
         sync_to_async(self.broadcast_json)('match-making', {
                 'type': 'updateQueue',
                 'action': 'REMOVE',
+                'user': {
                 **user
+                }
             }
         )
 
