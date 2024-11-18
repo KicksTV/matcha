@@ -419,7 +419,7 @@ class MatchMaking(WebSocketEndpoint):
             ws.send_json({
                 'type': 'matchResponse',
                 'proceeding': match['proceeding'],
-                'timedout': match['timedout'],
+                'timedout': match['timedout'] if 'timedout' in match else False,
                 'match': match
             })
         )
