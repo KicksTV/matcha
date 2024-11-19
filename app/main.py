@@ -485,9 +485,9 @@ class MatchMaking(WebSocketEndpoint):
 
         # logger.debug(f"Registered user into queue: {user}")
 
-        _remove_user_queue(user_id)
+        await _remove_user_queue(user_id)
 
-        del_user(user_id)
+        await del_user(user_id)
 
         sync_to_async(self.broadcast_json)('match-making', {
                 'type': 'updateQueue',
