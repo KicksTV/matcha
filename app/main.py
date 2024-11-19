@@ -475,7 +475,7 @@ class MatchMaking(WebSocketEndpoint):
     async def handle_leave_queue(self, ws, data):
         logger.debug('Removing user from queue')
         user_id = str(data["userId"])
-        # logger.debug(f"Rating for {user_id} is {ordinal}.")
+        logger.debug(f"Removing user from queue: {data}.")
         if not user_id:
             await ws.close(code=1008)
         user = await aget_user(user_id)
