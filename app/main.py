@@ -479,15 +479,16 @@ class MatchMaking(WebSocketEndpoint):
         if not user_id:
             await ws.close(code=1008)
         user = await aget_user(user_id)
-        
+        print("found user to remove: ", user)
+
         queue_listener.remove_user(user_id)
         queue_listener.unregister(user_id)
 
+        if not user:
+            return
+        
+
         # logger.debug(f"Registered user into queue: {user}")
-
-        await _remove_user_queue(user_id)
-
-        await del_user(user_id)
 
         sync_to_async(self.broadcast_json)('match-making', {
                 'type': 'updateQueue',
@@ -497,6 +498,12 @@ class MatchMaking(WebSocketEndpoint):
                 }
             }
         )
+
+        await _remove_user_queue(user_id)
+
+        await del_user(user_id)
+
+        
 
     async def handle_join_queue(self, ws, data):
         self.userDict = data['user']

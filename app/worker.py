@@ -79,8 +79,9 @@ def find_matches():
     It's important that a when a possible opponent is found that the player is also in the opponents player's ELO-range, this gives more balanced matches.
     It's also possible to cap out the ELO-range as to not get extreme ELO differences between players.
     """
-
-    for player in matchmaking_pool.zscan_iter("matchmaking_time"):
+    players_in_queue = matchmaking_pool.zscan_iter("matchmaking_time")
+    numb_in_queue = matchmaking_pool.zcount("matchmaking_pool", min=-100.0, max=100.0)
+    for player in players_in_queue:
         logger.info(f"------------------------------")
         logger.info(f"Checking: {player}")
         # Player id is the key
@@ -107,11 +108,19 @@ def find_matches():
         player_queue_time = player[1]
         player_time_in_queue = int(time.time()) - int(player_queue_time)
 
-        # TODO: remove magic numbers, extract to config
-        # minimum range = 1 and maximum range = 12
-        # this should be sweet spot to make match making snappy and fair
-        # after 30 seconds the range should widen to match against a wider range of opponents.
-        player_rank_range = min(3 * (1 + 25 / 100) ** int(player_time_in_queue / 40), 12)
+        # only care about matching similar ranks when more than 50 people in queue
+        print(numb_in_queue)
+        if numb_in_queue > 50:
+            # TODO: remove magic numbers, extract to config
+            # minimum range = 1 and maximum range = 12
+            # this should be sweet spot to make match making snappy and fair
+            # after 30 seconds the range should widen to match against a wider range of opponents.
+            player_rank_range = min(3 * (1 + 25 / 100) ** int(player_time_in_queue / 40), 12)
+
+        else:
+            player_rank_range = 100
+
+        
         logger.info(f"player_rank_range: {player_rank_range}")
         # Search all other players whose ELO is within the calculated range
         possible_opponents = []
@@ -143,11 +152,15 @@ def find_matches():
 
             opponent_time_in_queue = int(time.time()) - int(opponent_queue_time)
 
-            # TODO: remove magic numbers, extract to config
-            # minimum range = 1 and maximum range = 12
-            # this should be sweet spot to make match making snappy and fair
-            # after 30 seconds the range should widen to match against a wider range of opponents.
-            opponent_rank_range = min(3 * (1 + 25 / 100) ** int(player_time_in_queue / 40), 12)
+            if numb_in_queue > 50:
+
+                # TODO: remove magic numbers, extract to config
+                # minimum range = 1 and maximum range = 12
+                # this should be sweet spot to make match making snappy and fair
+                # after 30 seconds the range should widen to match against a wider range of opponents.
+                opponent_rank_range = min(3 * (1 + 25 / 100) ** int(player_time_in_queue / 40), 12)
+            else:
+                opponent_rank_range = 100
             logger.info(f"opponent_rank_range: {opponent_rank_range}")
 
             logger.info(f"Opponent Rank: {opponent_rank}")
