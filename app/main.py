@@ -29,6 +29,7 @@ from app.helpers.db import (
     add_user,
     del_user,
     get_all_users,
+    get_user_count,
     aget_user,
     update_games_played,
     update_match_response,
@@ -86,6 +87,18 @@ def queue_data(request):
     for r in results:
         users.append(json.loads(r['json']))
     return JSONResponse(users)
+
+def get_queue_count(request):
+    'Return all the queue data'
+    count = 0
+    try:
+        count = get_user_count()
+        logger.debug(count)
+    except ResponseError as e:
+        print(e)
+        create_indexes()
+
+    return JSONResponse({'queueCount': count})
 
 pub = redis.Redis(**config.redis_options)
 
@@ -396,8 +409,14 @@ class MatchMaking(WebSocketEndpoint):
                     asyncio.run(ws.send_json(json))
                 except Exception as e:
                     logger.debug(e)
-                    index = match_making_sessions[channel].index(ws)
-                    match_making_sessions[channel].pop(index)
+                    try:
+                        index = match_making_sessions[channel].index(ws)
+                        match_making_sessions[channel].pop(index)
+                    except Exception as ee:
+                        logger.debug(ee)
+                        logger.debug(index)
+                        logger.debug(match_making_sessions)
+
 
 
     @staticmethod
@@ -724,6 +743,7 @@ middleware = [
 
 routes = [
     Route("/queue-data/", queue_data, methods=["GET"]),
+    Route("/queue-count/", get_queue_count, methods=["GET"]),
     WebSocketRoute("/match-making/", MatchMaking),
 ]
 

@@ -17,6 +17,10 @@ def get_all_users() -> dict:
     results = r.ft().search(Query("*"))
     return results.docs
 
+def get_user_count() -> dict:
+    results = r.ft().search(Query("*").paging(0, 0)).total
+    return results
+
 def get_user(user_id: str) -> dict:
     user = r.json().get(f'user:{user_id}')
     if user:
