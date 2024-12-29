@@ -97,7 +97,7 @@ def get_queue_count(request):
     except ResponseError as e:
         print(e)
         create_indexes()
-
+    logger.debug(f"queue count: {count}")
     return JSONResponse({'queueCount': count})
 
 pub = redis.Redis(**config.redis_options)
