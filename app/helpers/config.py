@@ -15,5 +15,6 @@ class Config:
     }
     redis_url = os.getenv("REDIS_URL", '')
     baseUrl = os.getenv("BASE_URL", '')
+    django_auth_token = os.getenv("DJANGO_AUTH_TOKEN", '') or os.environ['django_auth_token']
     
 config = Config()

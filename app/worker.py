@@ -40,7 +40,7 @@ def publish_match(player_ids: list, event: str):
     try:
         # logger.debug(config.baseUrl)
         resp = requests.post(
-            f'{config.baseUrl}/api/matches/init-match/', data=json.dumps(match_data), headers={'Content-Type': 'application/json'}, timeout=5)
+            f'{config.baseUrl}/api/matches/init-match/', data=json.dumps(match_data), headers={'Content-Type': 'application/json', 'Authorization': f'Token {config.django_auth_token}'}, timeout=5)
         
         if resp and resp.ok:
             match_data = resp.json()
