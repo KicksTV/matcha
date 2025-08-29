@@ -400,22 +400,23 @@ class MatchMaking(WebSocketEndpoint):
             match_making_sessions[match_key] = [ws]
 
     @staticmethod
-    def broadcast_json(channel: str,  json: dict):
+    def broadcast_json(channel: str, json: dict, init_ws: WebSocket = None):
         logger.debug(f'Received data for channel {channel} to broadcast: {json}')
         logger.debug(f'match_making_sessions: {match_making_sessions}')
         if channel in match_making_sessions:
             for ws in list(match_making_sessions[channel]):
-                try:
-                    asyncio.run(ws.send_json(json))
-                except Exception as e:
-                    logger.debug(e)
+                if ws != init_ws:
                     try:
-                        index = match_making_sessions[channel].index(ws)
-                        match_making_sessions[channel].pop(index)
-                    except Exception as ee:
-                        logger.debug(ee)
-                        logger.debug(index)
-                        logger.debug(match_making_sessions)
+                        asyncio.run(ws.send_json(json))
+                    except Exception as e:
+                        logger.debug(e)
+                        try:
+                            index = match_making_sessions[channel].index(ws)
+                            match_making_sessions[channel].pop(index)
+                        except Exception as ee:
+                            logger.debug(ee)
+                            logger.debug(index)
+                            logger.debug(match_making_sessions)
 
 
 
