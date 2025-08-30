@@ -190,6 +190,7 @@ class MatchPubSubListener(object):
 
     def handler_match_response(self, message):
         msg = message['data']
+        logger.debug(f"Received match response msg: {msg}")
         if msg is not None:
             logger.debug(f"(Reader) Match Response Message Received: {msg}")
             match = json.loads(msg.decode())
@@ -233,6 +234,8 @@ class MatchPubSubListener(object):
                         MatchMaking.handle_match_status(pid, ws, match)
                     else:
                         missing_players.append(pid)
+
+                asyncio.run(update_match_proceeding(match_id, proceeding=False))
 
                 if len(missing_players):
                     logger.error(f'Player missing from MatchPubSubListener: {missing_players}')
@@ -322,7 +325,7 @@ class MatchMaking(WebSocketEndpoint):
             except Exception as e:
                 pass
 
-            _remove_user_queue(user_id)
+            await _remove_user_queue(user_id)
 
             await sync_to_async(self.broadcast_json)(
                 self.channel_name,
