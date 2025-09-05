@@ -165,11 +165,17 @@ def find_matches():
 
             logger.info(f"Opponent Rank: {opponent_rank}")
 
-
+            in_rank_range = (
+                opponent_rank - opponent_rank_range
+                ) <= player_rank <= (
+                opponent_rank + opponent_rank_range)
+            
+            print(f'is in rank range: {in_rank_range}')
+            
             # Make sure the player's ELO is also in the opponent's ELO-range
-            if (opponent_rank - opponent_rank_range) <= player_rank <= (
-                opponent_rank + opponent_rank_range
-            ) and player_id != opponent_id and len(possible_opponents) <= config.players_per_match-1:
+            if (in_rank_range and 
+               player_id != opponent_id and
+               len(possible_opponents) < config.players_per_match-1):
                 
                 opponent_data = get_user(opponent_id.decode())
                 if not opponent_data:
@@ -197,10 +203,15 @@ def find_matches():
                     "id": opponent_id,
                     "time_in_queue": opponent_time_in_queue,
                 }
-                possible_opponents.append(possible_opponent)
 
+                print(f'Adding possible opponent: {possible_opponent}')
+
+                possible_opponents.append(possible_opponent)
                 if len(possible_opponent) == config.players_per_match-1:
+                    print(f'Found enough players for a match!')
                     break
+        
+        print(f'possible_opponents: {possible_opponents}')
 
         if possible_opponents and len(possible_opponents) == config.players_per_match-1:
             logger.info(f"{len(possible_opponents)} possible opponents")
