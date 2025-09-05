@@ -405,7 +405,7 @@ class MatchMaking(WebSocketEndpoint):
     @staticmethod
     def broadcast_json(channel: str, json: dict, init_ws: WebSocket = None):
         logger.debug(f'Received data for channel {channel} to broadcast: {json}')
-        logger.debug(f'match_making_sessions: {match_making_sessions}')
+        # logger.debug(f'match_making_sessions: {match_making_sessions}')
         if channel in match_making_sessions:
             for ws in list(match_making_sessions[channel]):
                 if ws != init_ws:

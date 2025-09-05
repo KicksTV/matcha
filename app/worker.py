@@ -199,6 +199,9 @@ def find_matches():
                 }
                 possible_opponents.append(possible_opponent)
 
+                if len(possible_opponent) == config.players_per_match-1:
+                    break
+
         if possible_opponents and len(possible_opponents) == config.players_per_match-1:
             logger.info(f"{len(possible_opponents)} possible opponents")
             logger.info(possible_opponents)
