@@ -61,6 +61,41 @@ def call_repeatedly(interval, func, *args):
 
 
 HEART_BEAT_INTERVAL = 3.0
+
+
+# The redis pubsub listeners run in their own threads, but a websocket belongs to
+# uvicorn's loop. Driving it with asyncio.run() from the listener thread spins up a
+# second loop around a socket it does not own; when that misbehaves the exception dies
+# in the listener thread and the player simply never hears anything. Hop onto the real
+# loop instead.
+MAIN_LOOP = None
+
+
+def send_to_socket(ws, payload: dict) -> bool:
+    """Send a frame to a websocket from whichever thread we are on."""
+    try:
+        loop = MAIN_LOOP
+        if loop is not None and loop.is_running():
+            fut = asyncio.run_coroutine_threadsafe(ws.send_json(payload), loop)
+            fut.result(timeout=5)
+        else:
+            asyncio.run(ws.send_json(payload))
+        return True
+    except Exception as e:
+        logger.error(f'failed to send {payload.get("type")} to socket: {e!r}')
+        return False
+
+
+def client_key(player: dict) -> str:
+    """Key a match-payload player back to a registered socket.
+
+    Sockets are registered under USER ids (matcha's queue key, as sent by the app), but a
+    match payload's players carry PLAYER ids — different sequences. Django therefore adds
+    `userId` to Player.to_dict(); fall back to the raw id for older payloads.
+    """
+    return str(player.get('userId') or player.get('id'))
+
+
 async def is_websocket_active(ws: WebSocket) -> bool:
     if not (ws.application_state == WebSocketState.CONNECTED and ws.client_state == WebSocketState.CONNECTED):
         return False
@@ -136,9 +171,13 @@ class QueuePubSubListener(object):
             # notify all players that a match was found for them
             missing_players = []
             for player in match["players"]:
-                pid = player['id']
+                pid = client_key(player)
                 if pid in self.clients:
                     ws = self.clients[pid]
+                    # Subscribe the socket to the match channel here, where we provably
+                    # hold it: broadcasts of matchResult go to match:<id>, and a socket
+                    # that missed this registration receives nothing during the run.
+                    MatchMaking.add_session_to_match(ws, match["id"])
                     MatchMaking.handle_match_found(pid, ws, match)
                 else:
                     missing_players.append(pid)
@@ -207,20 +246,30 @@ class MatchPubSubListener(object):
                 asyncio.run(update_match_proceeding(match_id, proceeding=False))
 
                 for player in match['players']:
-                    pid = player['id']
+                    pid = client_key(player)
                     if pid in self.clients:
                         ws = self.clients[pid]
                         MatchMaking.handle_match_status(pid, ws, match)
                 return
 
             all_players_responded = False
+            accepted = [r for r in match['responses'] if r == 'ACCEPTED']
+            declined = [r for r in match['responses'] if r == 'DECLINED']
 
-            if len(list(filter(lambda r: r == "ACCEPTED", match["responses"]))) >= config.players_per_match:
+            if len(accepted) >= config.players_per_match:
                 logger.debug(f"All players have ACCEPTED the queue pop.")
                 match['proceeding'] = True
                 all_players_responded = True
-            elif len(list(filter(lambda r: r != "", match["responses"]))) == config.players_per_match:
-                logger.debug(f"All players have responded BUT not all accepted. Match cancelled!")
+            elif declined:
+                # One decline is enough — the field cannot be filled without them, and
+                # making the others sit out the 17s timer only holds them on a pop that
+                # can never start. Everyone else keeps their place in the queue.
+                decliners = [
+                    client_key(p) for i, p in enumerate(match['players'])
+                    if i < len(match['responses']) and match['responses'][i] == 'DECLINED'
+                ]
+                logger.debug(f"Match {match_id} declined by {decliners} — cancelling now, "
+                             f"{len([r for r in match['responses'] if r == ''])} player(s) still to answer")
                 match['proceeding'] = False
                 all_players_responded = True
             
@@ -228,14 +277,49 @@ class MatchPubSubListener(object):
                 # send players a message that the match will start
                 missing_players = []
                 for player in match['players']:
-                    pid = player['id']
+                    pid = client_key(player)
                     if pid in self.clients:
                         ws = self.clients[pid]
                         MatchMaking.handle_match_status(pid, ws, match)
                     else:
                         missing_players.append(pid)
 
-                asyncio.run(update_match_proceeding(match_id, proceeding=False))
+                # Persist the decision we just sent. This used to write proceeding=False
+                # unconditionally, even when everyone ACCEPTED — the stored doc then contradicted
+                # the matchResponse already delivered, and the next publish (second player's
+                # response, timeout sweep) told the app "not proceeding", so it stayed on the pop.
+                asyncio.run(update_match_proceeding(match_id, proceeding=bool(match['proceeding'])))
+
+                # Matched players are no longer looking for a game. This used to happen
+                # only on socket close, so both players stayed in the pool for the whole
+                # run: queue-count kept reporting them and the app kept showing the queue.
+                if match['proceeding']:
+                    for player in match['players']:
+                        pid = client_key(player)
+                        # make sure this socket is subscribed to the match channel so
+                        # splits/results broadcast to match:<id> actually reach it
+                        try:
+                            sock = queue_listener.clients.get(pid)
+                            if sock is not None:
+                                MatchMaking.add_session_to_match(sock, match_id)
+                                logger.debug(f'subscribed {pid} to match:{match_id} broadcasts')
+                            else:
+                                logger.debug(f'{pid} has no queue socket left; match-found already subscribed it')
+                        except Exception as e:
+                            logger.error(f'failed to subscribe {pid} to match {match_id}: {e}')
+                        try:
+                            asyncio.run(del_user(pid))
+                            logger.debug(f'removed {pid} from the queue pool (match {match_id} proceeding)')
+                        except Exception as e:
+                            logger.error(f'failed to drop {pid} from queue pool: {e}')
+                        try:
+                            queue_listener.remove_user(pid)
+                        except Exception:
+                            pass
+                        try:
+                            asyncio.run(_remove_user_queue(pid))
+                        except Exception:
+                            pass
 
                 if len(missing_players):
                     logger.error(f'Player missing from MatchPubSubListener: {missing_players}')
@@ -267,6 +351,10 @@ match_making_sessions = {'match-making': []}
 
 class MatchMaking(WebSocketEndpoint):
 
+    # Per-connection state lives on the INSTANCE (set in on_connect). These used to be class
+    # attributes, i.e. shared by every socket: one socket closing ran on_disconnect with the
+    # other socket's userDict and wiped a player who was still queued (queue emptied ~seconds
+    # after joining, with "Cannot call send once a close message has been sent" in the log).
     is_alive = True
     received_pong = False
     userDict = {}
@@ -284,6 +372,16 @@ class MatchMaking(WebSocketEndpoint):
         params = self.get_params(websocket)
         app = self.scope.get("app", None)
         self.channel_name = "match-making" # self.get_params(websocket).get('username', 'default_name')
+
+        # uvicorn's loop, for the pubsub threads to send frames on.
+        global MAIN_LOOP
+        MAIN_LOOP = asyncio.get_running_loop()
+
+        # Instance state: never share queue membership between sockets.
+        self.is_alive = True
+        self.received_pong = False
+        self.userDict = {}
+        self.ticker_task = None
 
         await websocket.accept()
 
@@ -303,11 +401,26 @@ class MatchMaking(WebSocketEndpoint):
             except:
                 pass
 
+        logger.info(f'ws disconnect: close_code={close_code} user={user_id} '
+                    f'in_queue={bool(user_id)} sock={id(websocket)}')
+
         self.is_alive = False
         if self.ticker_task:
             self.ticker_task.cancel()
 
         if user_id:
+            # A stale socket for this user must not evict the current one. The bot workflow
+            # "Clear bots" then "Add bot" reuses the same user ids, and the old socket's disconnect
+            # lands AFTER the new join — it used to delete the fresh doc/pool entry, so the bot
+            # reported "queued" while matcha's queue was empty. Same race exists for a phone that
+            # reconnects and rejoins before its old socket's close is processed.
+            owner = queue_listener.clients.get(user_id)
+            if owner is not None and owner is not websocket:
+                logger.info(f'ws disconnect: user {user_id} has a newer live socket — '
+                            f'leaving their queue entry alone')
+                await websocket.close(code=1008)
+                return
+
             try:
                 await del_user(user_id)
             except Exception as e:
@@ -375,7 +488,9 @@ class MatchMaking(WebSocketEndpoint):
         # counter = 0
         while self.is_alive:
             try:
-                # logger.debug('Sending PING')
+                # Reset before each ping: leaving it True meant a dead socket was never
+                # detected after the first pong.
+                self.received_pong = False
                 await asyncio.wait_for(ws.send_json({"type": 'ping'}), HEART_BEAT_INTERVAL)
                 # await asyncio.wait_for(self.received_pong(), HEART_BEAT_INTERVAL)
 
@@ -383,15 +498,16 @@ class MatchMaking(WebSocketEndpoint):
                 while not self.received_pong and counter < 5:
                     counter += 1
                     await asyncio.sleep(1)
-                if counter >= 5:
-                    logger.debug(f'WAITING FOR PONG TIMED OUT: {counter}')
+                if not self.received_pong:
+                    logger.info(f'WAITING FOR PONG TIMED OUT: user={self.userDict.get("id")}')
                     raise exceptions.TimeoutError()
-                # logger.debug(f'RECEIVED MSG: {msg}')
+                # logger.debug(f"RECEIVED MSG: {msg}")
             except Exception as e:
                 tracebac = traceback.format_exc()
                 self.is_alive = False
-                logger.debug(f'CLOSING WS, didn\'t receive pong: {e}: \n {tracebac}')
+                logger.info(f'CLOSING WS, didn\'t receive pong: {e}\n{tracebac}')
                 await self.on_disconnect(ws, 1008)
+                return
             await asyncio.sleep(3)
 
     @staticmethod
@@ -405,6 +521,13 @@ class MatchMaking(WebSocketEndpoint):
     @staticmethod
     def broadcast_json(channel: str, json: dict, init_ws: WebSocket = None):
         logger.debug(f'Received data for channel {channel} to broadcast: {json}')
+        if channel.startswith('match:'):
+            # how many live sockets this broadcast can actually reach — 0 or 1 here
+            # means a player's phone is never going to see the pin move
+            logger.debug(
+                f'broadcast {json.get("type")} -> {channel} has '
+                f'{len(match_making_sessions.get(channel, []))} socket(s)'
+            )
         # logger.debug(f'match_making_sessions: {match_making_sessions}')
         if channel in match_making_sessions:
             for ws in list(match_making_sessions[channel]):
@@ -425,9 +548,7 @@ class MatchMaking(WebSocketEndpoint):
 
     @staticmethod
     def handle_match_found(user_id: str, ws: WebSocket, match: dict):
-        try:
-            asyncio.run(ws.send_json({'type': 'matchFound', 'match': match}))
-        except:
+        if not send_to_socket(ws, {'type': 'matchFound', 'match': match}):
             logger.error("Tried to send a match found response but Websocket is closed. Have we not removed a ws from queue?")
         user_dict = asyncio.run(aget_user(user_id))
 
@@ -438,14 +559,12 @@ class MatchMaking(WebSocketEndpoint):
 
     @staticmethod
     def handle_match_status(user_id: str, ws: WebSocket, match: dict):
-        asyncio.run(
-            ws.send_json({
-                'type': 'matchResponse',
-                'proceeding': match['proceeding'],
-                'timedout': match['timedout'] if 'timedout' in match else False,
-                'match': match
-            })
-        )
+        send_to_socket(ws, {
+            'type': 'matchResponse',
+            'proceeding': match['proceeding'],
+            'timedout': match['timedout'] if 'timedout' in match else False,
+            'match': match
+        })
 
         user = asyncio.run(aget_user(user_id))
 
@@ -465,12 +584,20 @@ class MatchMaking(WebSocketEndpoint):
 
             MatchMaking.add_session_to_match(ws, match['id'])
         else:
+            # Look the player up by USER id (client_key), not `player['id']` — those are
+            # different sequences, so the old lookup always missed and the assert killed
+            # the fan-out loop before the remaining players were told anything. Cancelled
+            # matches then looked exactly like a dead socket to everyone involved.
             index = None
             for i, player in enumerate(match['players']):
-                if player['id'] == user_id:
+                if client_key(player) == user_id:
                     index = i
-            
-            assert index is not None
+                    break
+
+            if index is None:
+                logger.error(f'cancel frame for user {user_id} but they are not in match '
+                             f'{match.get("id")} (players: {[client_key(p) for p in match["players"]]})')
+                return
 
             response = match['responses'][index]
             if response in ['DECLINED', '', 'AWAITING']:
@@ -501,6 +628,15 @@ class MatchMaking(WebSocketEndpoint):
         logger.debug(f"Removing user from queue: {data}.")
         if not user_id:
             await ws.close(code=1008)
+
+        # Only the socket that currently owns the queue slot may remove the user. A stopped bot
+        # (or a phone that reconnected) can deliver leaveQueue late, after the same user has
+        # already rejoined on a new socket — that used to delete the fresh queue entry.
+        owner = queue_listener.clients.get(user_id)
+        if owner is not None and owner is not ws:
+            logger.info(f'leaveQueue for user {user_id} arrived on a stale socket — ignoring')
+            return
+
         user = await aget_user(user_id)
         print("found user to remove: ", user)
 
@@ -513,7 +649,8 @@ class MatchMaking(WebSocketEndpoint):
 
         # logger.debug(f"Registered user into queue: {user}")
 
-        sync_to_async(self.broadcast_json)('match-making', {
+        # was missing `await`, so the REMOVE broadcast never actually went out
+        await sync_to_async(self.broadcast_json)('match-making', {
                 'type': 'updateQueue',
                 'action': 'REMOVE',
                 'user': {
@@ -541,8 +678,9 @@ class MatchMaking(WebSocketEndpoint):
         if not user_id:
             await ws.close(code=1008)
         user = await aget_user(user_id)
-        # Add user to databaase as guest if not yet registered
-        if not user:
+        # Add user to databaase as guest if not yet registered (and refresh records written
+        # before playerId was stored — the queue key is a user id, Django needs the player id)
+        if not user or 'playerId' not in user:
             user = await add_user(self.userDict)
         else:
             # logger.debug(f"Updating ordinal {ordinal} for {user_id}.")
@@ -574,14 +712,20 @@ class MatchMaking(WebSocketEndpoint):
 
         index = None
         for i, player in enumerate(match['players']):
-            pid = player['id']
-            if pid == user_id:
+            if client_key(player) == user_id or str(player['id']) == user_id:
                 index = i
-        
-        assert index is not None
+
+        if index is None:
+            logger.error(f"match_response from user {user_id} but they are not in match "
+                         f"{match_id} (players: {[client_key(p) for p in match.get('players', [])]})")
+            return
 
         await insert_match_response(match_id, user_id, response, index)
 
+        # Re-read so the published doc carries EVERY response. Publishing this handler's own
+        # local copy meant each player's publish showed only their own answer, so the
+        # listener could never see "all players responded" and the queue pop never proceeded.
+        match = await get_match(match_id) or match
         match['responses'][index] = response
 
         logger.debug(
