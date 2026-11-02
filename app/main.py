@@ -600,7 +600,17 @@ class MatchMaking(WebSocketEndpoint):
                 return
 
             response = match['responses'][index]
-            if response in ['DECLINED', '', 'AWAITING']:
+
+            # Who actually loses their place? Only the player who said no (and, when
+            # the pop timed out, the ones who never answered). A player who simply
+            # had not tapped yet when someone ELSE declined is innocent — treating
+            # '' / AWAITING as a decline kicked them out of the queue, which is the
+            # "bot declined but I'm not back in the queue" report.
+            kicked = response == 'DECLINED'
+            if not kicked and match.get('timedout'):
+                kicked = response != 'ACCEPTED'
+
+            if kicked:
                 queue_listener.unregister(user_id)
                 queue_listener.remove_user(user_id)
 
