@@ -433,8 +433,18 @@ class MatchMaking(WebSocketEndpoint):
                 pass
 
             try:
-                match_listener.unregister(user_id)
-                match_listener.remove_user(user_id)
+                # Same stale-socket guard as the queue above. A reconnect (phone or the
+                # bots' clear+re-add) registers the NEW ws, then the old socket's close
+                # unregistered it — the next pop's cancel/result fan-out then found no
+                # client for that user ("Player missing from MatchPubSubListener") and
+                # the phone sat on the pop with nothing coming.
+                match_owner = match_listener.clients.get(user_id)
+                if match_owner is None or match_owner is websocket:
+                    match_listener.unregister(user_id)
+                    match_listener.remove_user(user_id)
+                else:
+                    logger.info(f'ws disconnect: user {user_id} has a newer match socket — '
+                                f'keeping it registered')
             except Exception as e:
                 pass
 
@@ -559,14 +569,41 @@ class MatchMaking(WebSocketEndpoint):
 
     @staticmethod
     def handle_match_status(user_id: str, ws: WebSocket, match: dict):
+        user = asyncio.run(aget_user(user_id))
+
+        # Who loses their queue place when a pop is cancelled? Anyone who did not
+        # ACCEPT it. Not answering is a no: that player leaves the queue rather than
+        # silently keeping a slot the phone has stopped watching (pool and app then
+        # disagree, and the next pop pairs a player who never sees it). A player who
+        # DID accept keeps their place and goes straight back to searching.
+        kicked = False
+        index = None
+        if not match['proceeding']:
+            # Look the player up by USER id (client_key), not `player['id']` — those are
+            # different sequences, so the old lookup always missed and the assert killed
+            # the fan-out loop before the remaining players were told anything. Cancelled
+            # matches then looked exactly like a dead socket to everyone involved.
+            for i, player in enumerate(match['players']):
+                if client_key(player) == user_id:
+                    index = i
+                    break
+
+            if index is None:
+                logger.error(f'cancel frame for user {user_id} but they are not in match '
+                             f'{match.get("id")} (players: {[client_key(p) for p in match["players"]]})')
+                return
+
+            kicked = match['responses'][index] != 'ACCEPTED'
+
         send_to_socket(ws, {
             'type': 'matchResponse',
             'proceeding': match['proceeding'],
             'timedout': match['timedout'] if 'timedout' in match else False,
+            # Per socket: whether THIS player still has a queue place. Without it the
+            # app shows "still searching" for someone the server has already dropped.
+            'kicked': kicked,
             'match': match
         })
-
-        user = asyncio.run(aget_user(user_id))
 
         if match['proceeding']:
             # remove them from queue
@@ -584,32 +621,7 @@ class MatchMaking(WebSocketEndpoint):
 
             MatchMaking.add_session_to_match(ws, match['id'])
         else:
-            # Look the player up by USER id (client_key), not `player['id']` — those are
-            # different sequences, so the old lookup always missed and the assert killed
-            # the fan-out loop before the remaining players were told anything. Cancelled
-            # matches then looked exactly like a dead socket to everyone involved.
-            index = None
-            for i, player in enumerate(match['players']):
-                if client_key(player) == user_id:
-                    index = i
-                    break
-
-            if index is None:
-                logger.error(f'cancel frame for user {user_id} but they are not in match '
-                             f'{match.get("id")} (players: {[client_key(p) for p in match["players"]]})')
-                return
-
-            response = match['responses'][index]
-
-            # Who actually loses their place? Only the player who said no (and, when
-            # the pop timed out, the ones who never answered). A player who simply
-            # had not tapped yet when someone ELSE declined is innocent — treating
-            # '' / AWAITING as a decline kicked them out of the queue, which is the
-            # "bot declined but I'm not back in the queue" report.
-            kicked = response == 'DECLINED'
-            if not kicked and match.get('timedout'):
-                kicked = response != 'ACCEPTED'
-
+            # `kicked` / `index` were resolved above, before the frame went out.
             if kicked:
                 queue_listener.unregister(user_id)
                 queue_listener.remove_user(user_id)

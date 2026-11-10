@@ -45,6 +45,10 @@ async def add_user(userDict: dict) -> dict:
     user_id = str(userDict['id'])
     user = {
         "id": user_id,
+        # Django needs the PLAYER id to build the match: the queue key above is the USER pk,
+        # and the two are different sequences. Without this, Match.init() (which looks up
+        # PlayerRank by player_id) attached the wrong players to the match.
+        "playerId": str(userDict['player'].get('id')),
         "username": userDict['username'],
         "firstName": userDict['player']['firstName'],
         "lastName": userDict['player']['lastName'],

@@ -67,6 +67,14 @@ def queue_time_out(match):
     if len(match['players']) == len(list(filter(lambda r: r != "", match["responses"]))):
         # everyone responded, no need to continue
         return
+    # A decline already cancelled this pop when it landed. Sweeping it again 17s later
+    # is not harmless: the fan-out is routed by USER id, so a player who requeued and
+    # caught a NEW pop in the meantime got this stale cancel delivered on the new
+    # socket — and, because not answering now means losing your place, it also dropped
+    # them from a queue they had legitimately rejoined. The pop is settled; leave it.
+    if match.get('proceeding') or 'DECLINED' in match['responses']:
+        logger.debug(f"Match {match['id']} already resolved — skipping timeout sweep")
+        return
     logger.debug(f"Queue timed out. Match will now be cancelled!")
     match['timedout'] = True
     pub.publish("match_responses", json.dumps(match))
