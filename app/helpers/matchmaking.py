@@ -14,7 +14,12 @@ logger = logging.getLogger("matcha")
 
 r = Redis(**config.redis_options)
 
-async def _put_user_queue(user_id: str, user_ordinal: float, t: float = time.time()):
+async def _put_user_queue(user_id: str, user_ordinal: float, t=None):
+    # NOTE: this default used to be `time.time()`, which Python evaluates ONCE at import —
+    # every queue entry got matcha's boot time as its wait, so `time_in_queue` was really
+    # "server uptime" and the rank-widening formula jumped straight to its cap.
+    if t is None:
+        t = time.time()
     redis = await aioredis.from_url(f"{config.redis_url}")
     # logger.debug(f"adding rank to queue: {user_ordinal}")
     await redis.zadd("matchmaking_pool", {user_id: user_ordinal})

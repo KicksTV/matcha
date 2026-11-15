@@ -571,11 +571,15 @@ class MatchMaking(WebSocketEndpoint):
     def handle_match_status(user_id: str, ws: WebSocket, match: dict):
         user = asyncio.run(aget_user(user_id))
 
-        # Who loses their queue place when a pop is cancelled? Anyone who did not
-        # ACCEPT it. Not answering is a no: that player leaves the queue rather than
-        # silently keeping a slot the phone has stopped watching (pool and app then
-        # disagree, and the next pop pairs a player who never sees it). A player who
-        # DID accept keeps their place and goes straight back to searching.
+        # Who loses their queue place when a pop is cancelled?
+        #  * Timed out (nobody accepted in time): not answering is a no, so anyone who did
+        #    not ACCEPT is dropped — they let the window run out and keeping them in the pool
+        #    pairs a player who never looks at their phone.
+        #  * Declined (another player said no): the pop is void for everyone, so ONLY the
+        #    decliner loses their place. Someone who was still deciding (responses[i] == '')
+        #    did nothing wrong and must go straight back to searching — kicking them meant
+        #    every decline-bot test silently dumped the real player out of the queue.
+        # A player who DID accept always keeps their place.
         kicked = False
         index = None
         if not match['proceeding']:
@@ -593,7 +597,11 @@ class MatchMaking(WebSocketEndpoint):
                              f'{match.get("id")} (players: {[client_key(p) for p in match["players"]]})')
                 return
 
-            kicked = match['responses'][index] != 'ACCEPTED'
+            my_response = match['responses'][index]
+            if match.get('timedout'):
+                kicked = my_response != 'ACCEPTED'
+            else:
+                kicked = my_response == 'DECLINED'
 
         send_to_socket(ws, {
             'type': 'matchResponse',
