@@ -59,11 +59,11 @@ async def _get_match_proceeding(channel: aioredis.client.PubSub, user_id: str):
                 logger.debug(f"Not all players responded in time. Match cancelled!")
                 match['proceeding'] = False
                 break
-            elif len(list(filter(lambda r: r == "ACCEPTED", match["responses"]))) >= config.players_per_match:
+            elif len(list(filter(lambda r: r == "ACCEPTED", match["responses"]))) >= len(match["players"]):
                 logger.debug(f"All players have ACCEPTED the queue pop.")
                 match['proceeding'] = True
                 break
-            elif len(match["responses"]) == config.players_per_match:
+            elif len(match["responses"]) == len(match["players"]):
                 logger.debug(f"All players have responded BUT not all accepted. Match cancelled!")
                 match['proceeding'] = False
                 break

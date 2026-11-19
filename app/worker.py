@@ -9,6 +9,8 @@ import sys
 import redis
 import random
 
+from typing import Optional
+
 from threading import Timer
 
 from app.helpers.db import add_match, get_match, aget_user, get_user
@@ -26,12 +28,20 @@ logger.addHandler(ch)
 matchmaking_pool = redis.Redis(**config.redis_options)
 pub = redis.Redis(**config.redis_options)
 
+
+def _as_str(pid) -> str:
+    """Redis hands back bytes; the JSON user blobs are keyed by str."""
+    if isinstance(pid, (bytes, bytearray)):
+        return pid.decode('utf-8')
+    return str(pid)
+
+
 def publish_match(player_ids: list, event: str):
-    logger.debug("Publishing match...")
+    logger.debug(f"Publishing match for {len(player_ids)} players: {player_ids}")
 
     # create match sql record
     match_data = {
-        'players': [asyncio.run(aget_user(pid.decode('utf-8'))) for pid in player_ids],
+        'players': [asyncio.run(aget_user(_as_str(pid))) for pid in player_ids],
         'status': 'STARTING',
         'event': event,
         'createdOn': time.time()
@@ -79,169 +89,155 @@ def queue_time_out(match):
     match['timedout'] = True
     pub.publish("match_responses", json.dumps(match))
 
+def _waited_seconds(queued_at) -> int:
+    """Seconds this entry has been in the pool (queue time is the zset SCORE)."""
+    try:
+        return max(0, int(time.time()) - int(float(queued_at)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rank_window(waited: int, thin_pool: bool) -> Optional[float]:
+    """How far apart two ordinals may be before they are not comparable.
+
+    Thin pool → None, meaning "do not filter": KiX's rule is that when only a couple of
+    players are queued they should race each other regardless of the rank difference.
+    A busy pool widens the window the longer someone waits (3 → 12 ordinals over ~2 min).
+    """
+    if thin_pool:
+        return None
+    return min(3 * (1 + 25 / 100) ** int(waited / 40), 12)
+
+
+def _within(rank_a, rank_b, window) -> bool:
+    if window is None:
+        return True
+    return (rank_b - window) <= rank_a <= (rank_b + window)
+
+
 def find_matches():
-    """
-    Loop over all players and look for potential opponents. Publish a match when 2 opponents have been found within eachothers ELO-range.
+    """Group queued players into one match of up to MATCH_MAX_PLAYERS runners.
 
-    The longer a player is queueing the bigger his ELO-range will be. This should reduce matchmaking time and can be tuned with variables in the config.
-    It's important that a when a possible opponent is found that the player is also in the opponents player's ELO-range, this gives more balanced matches.
-    It's also possible to cap out the ELO-range as to not get extreme ELO differences between players.
-    """
-    players_in_queue = matchmaking_pool.zscan_iter("matchmaking_time")
-    numb_in_queue = matchmaking_pool.zcount("matchmaking_pool", min=-100.0, max=100.0)
-    for player in players_in_queue:
-        logger.info(f"------------------------------")
-        logger.info(f"Checking: {player}")
-        # Player id is the key
-        player_id = player[0]
+    One pop, N players: as soon as MATCH_MIN_PLAYERS (default 2) compatible players are
+    queued a match is created, and it fills to the max (default 6). Compatibility =
+    a shared EVENT (a 1.5K runner cannot race a 5K runner) plus, when the pool is busy,
+    an overlapping rank window. In a thin pool the rank window is dropped entirely, so
+    two players at opposite ends of the ladder still get a race instead of both waiting.
 
-        # Using the player ID we can retrieve it's ELO.
-        player_rank = matchmaking_pool.zscore("matchmaking_pool", player_id)
-        player_data = get_user(player_id.decode())
+    Every member of a group must share the SAME event — the intersection narrows as the
+    group grows, which is why the event is only chosen once the group is closed.
+    """
+    queued = [(_as_str(pid), score) for pid, score in
+              matchmaking_pool.zscan_iter("matchmaking_time")]
+    numb_in_queue = len(queued)
+    thin_pool = numb_in_queue <= config.thin_pool_threshold
+
+    logger.info(f"------------------------------")
+    logger.info(f"{numb_in_queue} in queue (thin pool: {thin_pool})")
+
+    taken = set()
+
+    # Everyone's rank is read once: zrange returns members ordered by ordinal.
+    ranks = {_as_str(pid): score for pid, score in
+             matchmaking_pool.zrange("matchmaking_pool", 0, -1, withscores=True)}
+
+    for player_id, queued_at in queued:
+        if player_id in taken:
+            continue
+
+        player_rank = ranks.get(player_id)
+        if player_rank is None:
+            logger.info(f"No rank in pool.... skipping: {player_id}")
+            continue
+
+        player_data = get_user(player_id)
         if not player_data:
             logger.error(f'No player data for {player_id}')
             continue
-        player_events = player_data['events']
 
-        logger.info(f"Player Rank: {player_rank}")
-        logger.info(f"Player Events: {player_events}")
-
-        # When the player has stopped queueing it won't be present
-        if not player_rank and player_rank != 0.0:
-            logger.info(f"No rank.... skipping: {player}")
+        player_events = set(player_data.get('events') or [])
+        if not player_events:
+            logger.info(f"No events.... skipping: {player_id}")
             continue
 
-        # The time at which the player queued is the value in the table.
-        # Taking the difference between queue time and current time is the time the player has been in the queue.
-        player_queue_time = player[1]
-        player_time_in_queue = int(time.time()) - int(player_queue_time)
+        waited = _waited_seconds(queued_at)
+        window = _rank_window(waited, thin_pool)
+        logger.info(f"Checking: {player_id} rank={player_rank} waited={waited}s window={window}")
 
-        # only care about matching similar ranks when more than 50 people in queue
-        print(numb_in_queue)
-        if numb_in_queue > 50:
-            # TODO: remove magic numbers, extract to config
-            # minimum range = 1 and maximum range = 12
-            # this should be sweet spot to make match making snappy and fair
-            # after 30 seconds the range should widen to match against a wider range of opponents.
-            player_rank_range = min(3 * (1 + 25 / 100) ** int(player_time_in_queue / 40), 12)
-
-        else:
-            player_rank_range = 100
-
-        
-        logger.info(f"player_rank_range: {player_rank_range}")
-        # Search all other players whose ELO is within the calculated range
-        possible_opponents = []
-
-        for opponent in matchmaking_pool.zrangebyscore(
-            "matchmaking_pool",
-            int(player_rank - player_rank_range),
-            int(player_rank + player_rank_range),
-            withscores=True,
-        ):
-            opponent_id = opponent[0]
-
-            if opponent_id == player_id:
+        candidates = []
+        for opponent_id, opponent_rank in ranks.items():
+            if opponent_id == player_id or opponent_id in taken:
                 continue
 
-            opponent_rank = opponent[1]
-
-            logger.info(f"opponent: {opponent}")
-            # Now we go the opposite direction, using the ID we retrieve the opponent's time in the queue.
-
-            opponent_queue_time = matchmaking_pool.zscore(
-                "matchmaking_time", opponent_id
-            )
-
-            # When the player has stopped queueing it won't be present
-            if not opponent_queue_time:
-                logger.info("No opponent_queue_time.... skipping: ", opponent)
+            opponent_data = get_user(opponent_id)
+            if not opponent_data:
+                logger.error(f'No player data for {opponent_id}')
+                continue
+            opponent_events = set(opponent_data.get('events') or [])
+            if not opponent_events & player_events:
                 continue
 
-            opponent_time_in_queue = int(time.time()) - int(opponent_queue_time)
+            opponent_waited = _waited_seconds(
+                matchmaking_pool.zscore("matchmaking_time", opponent_id))
 
-            if numb_in_queue > 50:
-
-                # TODO: remove magic numbers, extract to config
-                # minimum range = 1 and maximum range = 12
-                # this should be sweet spot to make match making snappy and fair
-                # after 30 seconds the range should widen to match against a wider range of opponents.
-                opponent_rank_range = min(3 * (1 + 25 / 100) ** int(player_time_in_queue / 40), 12)
-            else:
-                opponent_rank_range = 100
-            logger.info(f"opponent_rank_range: {opponent_rank_range}")
-
-            logger.info(f"Opponent Rank: {opponent_rank}")
-
-            in_rank_range = (
-                opponent_rank - opponent_rank_range
-                ) <= player_rank <= (
-                opponent_rank + opponent_rank_range)
-            
-            print(f'is in rank range: {in_rank_range}')
-            
-            # Make sure the player's ELO is also in the opponent's ELO-range
-            if (in_rank_range and 
-               player_id != opponent_id and
-               len(possible_opponents) < config.players_per_match-1):
-                
-                opponent_data = get_user(opponent_id.decode())
-                if not opponent_data:
-                    logger.error(f'No player data for {opponent_id}')
-                    continue
-                opponent_events = opponent_data['events']
-
-                logger.info(f"Opponent Events: {opponent_events}")
-
-                # check if opponent wants to compeat in same events
-                common_events = []
-                for event in opponent_events:
-                    if event in player_events:
-                        common_events.append(event)
-                
-                if not len(common_events):
+            # Both directions must agree: the candidate has to be inside this player's
+            # window and this player inside the candidate's own (widened by their wait).
+            if not thin_pool:
+                opponent_window = _rank_window(opponent_waited, thin_pool)
+                if not (_within(player_rank, opponent_rank, window)
+                        and _within(opponent_rank, player_rank, opponent_window)):
                     continue
 
-                # randomly pick an event
-                random_num = random.randint(0,(len(common_events)-1))
+            candidates.append({
+                'id': opponent_id,
+                'rank': opponent_rank,
+                'waited': opponent_waited,
+                'events': opponent_events,
+            })
 
-                event = common_events[random_num]
+        # Longest waiters first: the people who have been staring at the spinner get in.
+        candidates.sort(key=lambda c: c['waited'], reverse=True)
 
-                possible_opponent = {
-                    "id": opponent_id,
-                    "time_in_queue": opponent_time_in_queue,
-                }
+        group = [player_id]
+        common_events = set(player_events)
+        for candidate in candidates:
+            if len(group) >= config.max_players_per_match:
+                break
+            shared = common_events & candidate['events']
+            if not shared:
+                # no event common to the whole group — cannot add without splitting it
+                continue
+            group.append(candidate['id'])
+            common_events = shared
+            taken.add(candidate['id'])
 
-                print(f'Adding possible opponent: {possible_opponent}')
+        logger.info(f"possible_opponents: {group[1:]} "
+                    f"(group size {len(group)}, common events {sorted(common_events)})")
 
-                possible_opponents.append(possible_opponent)
-                if len(possible_opponent) == config.players_per_match-1:
-                    print(f'Found enough players for a match!')
-                    break
-        
-        print(f'possible_opponents: {possible_opponents}')
+        if len(group) < config.min_players_per_match:
+            logger.info(f"Not enough players for a match yet ({len(group)})")
+            continue
 
-        if possible_opponents and len(possible_opponents) == config.players_per_match-1:
-            logger.info(f"{len(possible_opponents)} possible opponents")
-            logger.info(possible_opponents)
-            # Sort opponents by time in queue from longest to shortest
-            possible_opponents.sort(key=lambda x: x["time_in_queue"], reverse=True)
+        # Give a partial group a moment to fill up: a burst of players joining (or the
+        # app's own retry) should build one 6-way race, not three 1v1s. Once the oldest
+        # member has waited fill_wait_seconds we take what we have — a thin queue must
+        # still match the two people in it.
+        if len(group) < config.max_players_per_match and waited < config.fill_wait_seconds:
+            logger.info(f"Holding pop for {len(group)} players "
+                        f"({config.fill_wait_seconds - waited}s left to fill, max {config.max_players_per_match})")
+            continue
 
-            # Remove both players from matchmaking pool
-            matchmaking_pool.zrem("matchmaking_time", player_id)
-            matchmaking_pool.zrem("matchmaking_pool", player_id)
+        # Everyone left in the group shares these; pick one fairly (not always the same).
+        event = random.choice(sorted(common_events))
+        logger.info(f"Match found: {len(group)} players for {event}")
 
-            player_ids = [player_id]
+        for pid in group:
+            matchmaking_pool.zrem("matchmaking_time", pid)
+            matchmaking_pool.zrem("matchmaking_pool", pid)
+            ranks.pop(pid, None)
+        taken.add(player_id)
 
-            for i in range(len(possible_opponents)):
-                logger.info(possible_opponents[i]["id"])
-                matchmaking_pool.zrem("matchmaking_time", possible_opponents[i]["id"])
-                matchmaking_pool.zrem("matchmaking_pool", possible_opponents[i]["id"])
-
-                player_ids.append(possible_opponents[i]["id"])
-
-            # Return the opponent that has been queueing the longest
-            publish_match(player_ids, event)
+        publish_match(group, event)
 
 
 def terminate(signal, frame):

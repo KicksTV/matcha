@@ -256,7 +256,7 @@ class MatchPubSubListener(object):
             accepted = [r for r in match['responses'] if r == 'ACCEPTED']
             declined = [r for r in match['responses'] if r == 'DECLINED']
 
-            if len(accepted) >= config.players_per_match:
+            if len(accepted) >= len(match['players']):
                 logger.debug(f"All players have ACCEPTED the queue pop.")
                 match['proceeding'] = True
                 all_players_responded = True
@@ -739,11 +739,27 @@ class MatchMaking(WebSocketEndpoint):
         response = data['response']
 
         match = await get_match(match_id)
+        if not match:
+            logger.error(f"match_response for unknown match {match_id} (user {user_id})")
+            return
 
+        # Resolve the sender's slot by USER id (`client_key`). Never compare the raw
+        # `player['id']` in the same pass: player ids and user ids are separate
+        # sequences, so in a 6-player match user 6 also looked like "player 6" (a
+        # different player in the same match) and the answer was written into the wrong
+        # slot — one runner's ACCEPTED vanished, so `proceeding` never became true.
         index = None
         for i, player in enumerate(match['players']):
-            if client_key(player) == user_id or str(player['id']) == user_id:
+            if client_key(player) == user_id:
                 index = i
+                break
+        if index is None:
+            # Legacy payload without `userId`: only trust the player id when exactly one
+            # player in the match carries it.
+            candidates = [i for i, p in enumerate(match['players'])
+                          if str(p.get('id')) == user_id]
+            if len(candidates) == 1:
+                index = candidates[0]
 
         if index is None:
             logger.error(f"match_response from user {user_id} but they are not in match "
